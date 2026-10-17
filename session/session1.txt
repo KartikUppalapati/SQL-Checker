@@ -1,0 +1,3267 @@
+
+❯ Here's the context behind this project. First lets set up the repo to match
+  the intended outline
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ I'll scaffold the layout from the spec, with a working CLI stub for score so
+  the I/O contract is in place before the equivalence logic exists.
+
+⏺ Bash(mkdir -p dataset/schemas session sqleval generator tests && touch
+      dataset/queries.jsonl dataset/pairs.jsonl session/.gitkeep
+      dataset/schemas/.gitkeep && cat REA…)
+  ⎿  Created dataset/pairs.jsonl (+0 -0)
+  ⎿  Created dataset/queries.jsonl (+0 -0)
+  ⎿  Created dataset/schemas/.gitkeep (+0 -0)
+  ⎿  Created session/.gitkeep (+0 -0)
+
+⏺ Write(score)
+  ⎿  Wrote 14 lines to score
+      1 #!/usr/bin/env python3
+      2 """Scoring harness CLI.
+      3
+      4 Usage: ./score --schemas <schemas_dir> --pairs <pairs.jsonl> --ou
+        tput <results.jsonl>
+      5 """
+      6 import os
+      7 import sys
+      8
+      9 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+     … +5 lines (ctrl+o to expand)
+
+⏺ Write(sqleval/__init__.py)
+  ⎿  Wrote 1 line to sqleval/__init__.py
+      1 """Deterministic SQL equivalence scoring (no LLMs, no query execu
+        tion)."""
+
+⏺ Write(sqleval/equivalence.py)
+  ⎿  Wrote 16 lines to sqleval/equivalence.py
+      1 """Decide whether a predicted query is equivalent to the ground t
+        ruth."""
+      2 from dataclasses import dataclass
+      3
+      4
+      5 @dataclass
+      6 class Verdict:
+      7     match: bool
+      8     score: float
+      9     reason: str = ""
+     … +8 lines (ctrl+o to expand)
+
+⏺ Write(sqleval/cli.py)
+  ⎿  Wrote 57 lines to sqleval/cli.py
+       1 import argparse
+       2 import json
+       3 from collections import Counter
+       4 from pathlib import Path
+       5
+       7
+       8
+       9 def load_schemas(schemas_dir: Path) -> dict[str, str]:
+      10     return {p.stem: p.read_text() for p in sorted(schemas_dir.gl
+         ob("*.sql"))}
+     … +54 lines (ctrl+o to expand)
+
+⏺ Bash(chmod +x score && rm dataset/schemas/.gitkeep 2>/dev/null; touch
+      dataset/schemas/.gitkeep generator/.gitkeep tests/.gitkeep
+      printf 'sqlglot==25.34.1\n' > requir…)
+  ⎿  Created generator/.gitkeep (+0 -0)
+  ⎿  Created tests/.gitkeep (+0 -0)
+  ⎿  Created .gitignore (+5 -0)
+      1 +.venv/                                                          
+      2 +__pycache__/                                                    
+      3 +*.pyc                                                           
+      4 +results*.jsonl                                                  
+      5 +.DS_Store                                                       
+  ⎿  Updated README.md (+42 -1)
+       1 -# SQL-Checker                                                  
+       1 +# SQL-Checker: Deterministic SQL Evaluator                     
+       2 +                                                               
+       3 +Synthetic evaluation suite for a natural-language-to-SQL CLI, p
+         +lus a scoring harness that decides                             
+       4 +whether a predicted PostgreSQL query is equivalent to the groun
+         +d truth **without executing either                             
+       5 +query and without any LLM calls**.                             
+       6 +                                                               
+       7 +## Layout                                                      
+       8 +                                                               
+       9 +```                                                            
+      10 +score                   # scoring harness CLI                  
+      11 +requirements.txt        # Python dependencies for score        
+      12 +sqleval/                # harness implementation               
+      13 +generator/              # programs used to generate the dataset
+      14 +dataset/                                                       
+      15 +  schemas/<id>.sql      # one DDL file per schema              
+      16 +  queries.jsonl         # NL questions + target SQL            
+      17 +  pairs.jsonl           # labeled (ground_truth, predicted, equ
+         +ivalent) pairs                                                 
+      18 +tests/                                                         
+      19 +session/                # exported LLM/agent session history   
+      20 +```                                                            
+      21 +                                                               
+      22 +## Usage                                                       
+      23 +                                                               
+      24 +```bash                                                        
+      25 +python3.12 -m venv .venv && source .venv/bin/activate          
+      26 +pip install -r requirements.txt                                
+      27 +./score --schemas dataset/schemas --pairs dataset/pairs.jsonl -
+         +-output results.jsonl                                          
+      28 +```                                                            
+      29 +                                                               
+      30 +## Dataset design                                              
+      31 +                                                               
+      32 +### How schemas were varied                                    
+      33 +_TODO_                                                         
+      34 +                                                               
+      35 +### Queries and labeled pairs                                  
+      36 +_TODO_                                                         
+      37 +                                                               
+      38 +## How scoring works                                           
+      39 +_TODO_                                                         
+     … 3 more lines (ctrl+o to expand)
+  ⎿  Created requirements.txt (+1 -0)
+      1 +sqlglot==25.34.1                                                
+  ⎿  … 1 more file changed
+
+⏺ The repo now matches the layout in the spec. ./score runs end to end on a
+  small test file. It doesn't decide equivalence yet: it only counts
+  byte-identical queries as a match.
+
+  What's there:
+  - score: the executable the spec asks for. It takes --schemas, --pairs and
+    --output, writes one line per pair in the required format, prints a summary
+    and exits with status 0.
+  - sqleval/cli.py: handles the required behaviour around the check itself:
+    - A null or empty prediction gets match: false, score: 0.
+    - An error on one pair is caught, so it can't abort the whole run.
+    - score is set to 1.0 whenever match is true.
+    - If the pairs file has equivalent labels, the summary also shows how often
+      the verdicts agree with them.
+  - sqleval/equivalence.py: holds compare(), which is where the real equivalence
+    logic will go. Right now it's a placeholder.
+  - dataset/: an empty schemas/ folder plus empty queries.jsonl and pairs.jsonl
+    files.
+  - generator/: for the programs that build the dataset. tests/ and session/ are
+    empty for now.
+  - README.md: has the sections the spec requires (schema variation, how scoring
+    works, known limitations), each marked TODO.
+  - requirements.txt: pins sqlglot==25.34.1, which handles PostgreSQL parsing.
+    That's my default choice; we can change it if you'd prefer another parser.
+  - .venv/: a Python 3.12 environment with the requirements installed. It's
+    listed in .gitignore.
+
+  Your system python3 is version 3.9, so run source .venv/bin/activate before
+  calling ./score. Otherwise the script runs under 3.9 and fails on the newer
+  type-hint syntax. The graders use 3.12, so this only matters on your machine.
+
+  I haven't committed anything. Next I'd suggest the schemas and the generator,
+  then the equivalence logic.
+
+❯ <ide_opened_file>The user opened the file
+  /Users/kartikuppalapati/Documents/Projects/SQL-Checker/sqleval/cli.py in the
+  IDE. This may or may not be related to the current task.</ide_opened_file>
+
+❯ Update the python on my machine to use 3.12
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Python 3.9 takes priority because ~/.zprofile puts python.org's 3.8/3.9
+  framework paths ahead of Homebrew's /opt/homebrew/bin in PATH, and Homebrew's
+  python3 points to 3.14 anyway. Before making changes, I'll check where
+  Homebrew's unversioned 3.12 binaries are located.
+
+  Listed 1 directory (ctrl+o to expand)
+
+⏺ I'll back up ~/.zprofile and add Homebrew's Python 3.12 directory to the front
+  of your PATH, leaving the existing 3.8 and 3.9 lines untouched so it's easy
+  to revert.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ New shells now use Python 3.12 by default. I tested it in a fresh login shell:
+  python3, python, pip3 and /usr/bin/env python3 (what ./score uses) all point
+  to Homebrew's 3.12.0.
+
+  What changed: I added a few lines to the end of ~/.zprofile that put
+  /opt/homebrew/opt/python@3.12/libexec/bin at the front of your PATH. The older
+  lines that add Python 3.8 and 3.9 are still in the file, but the new entry
+  wins because it comes first. The previous version is saved as
+  ~/.zprofile.bak-2026-10-17. To undo the change, delete those added lines or
+  restore that backup.
+
+  Next steps:
+  - Open a new terminal tab. This includes VS Code's integrated terminal, which
+    may need a restart. Shells that are already open still use 3.9.
+  - Packages: your 3.9 install has its own packages, which don't carry over. For
+    this project they're already installed in the 3.12 .venv.
+  - Bash: ~/.bash_profile hard-codes a PATH with 3.8, so bash shells still get
+    the old version. Your login shell is zsh, so this only matters if you run
+    bash yourself. I can fix it too if you want.
+
+❯ <ide_opened_file>The user opened the file
+  /Users/kartikuppalapati/Documents/Projects/SQL-Checker/sqleval/cli.py in the
+  IDE. This may or may not be related to the current task.</ide_opened_file>
+
+❯ remember that for this project all schemas and queries use postgresql
+
+  Listed 1 directory, wrote 2 memories (ctrl+o to expand)
+
+⏺ Saved. Future sessions on this project will know that every schema, target
+  query and predicted query is PostgreSQL. That means:
+
+  - Generated DDL and SQL will use Postgres syntax.
+  - The harness will parse with dialect="postgres" and won't handle other
+    dialects.
+  - Equivalence will follow Postgres rules: unquoted names fold to lowercase,
+    quoted names keep their case, and integer division truncates (5/2 = 2).
+
+❯ now lets focus on the dataset.
+
+  The dataset should have schema definitions in DDL format, a set of
+  natural-language queries, and the target SQL for
+  each query. Vary the schema shapes and naming conventions deliberately, and
+  tell us in the README
+  how you varied them
+
+  For the variations lets do table schemas with many to many relatioships,
+  self-referntial joins and also star vs snowflake schemas. Also lets vary the
+  naming with snake case camelcase and pascal case. Use generic names across
+  tables so the testing harness uses table.name and also allow for nullable
+  fields and also for any binary state column use int 1/0 or string on/off or
+  an enum
+
+⏺ Before designing the schemas, I'll check whether a local PostgreSQL is
+  installed. Running each target query against its schema while generating the
+  dataset is allowed, since the no-execution rule only applies to the harness,
+  and it would catch broken target SQL.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Since there's no local Postgres, I'll validate using pglast (checks Postgres
+  syntax via its parser) and sqlglot with schema qualification (confirms
+  referenced tables/columns exist, applying Postgres case folding). I'll add
+  pglast to a separate generator requirements file, not the harness
+  requirements.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Both parsers work, but sqlglot can't parse CREATE TYPE ... AS ENUM, so I'll
+  have the schema loader extract enum types from the raw command itself. I'll
+  place this loader in sqleval/ since the harness will need the same table,
+  column, and constraint info later.
+
+⏺ Write(sqleval/schema.py)
+  ⎿  Wrote 129 lines to sqleval/schema.py
+       1 """Load a PostgreSQL DDL file into a catalog of tables, columns,
+          keys and enum types.
+       2
+          fold to lowercase,
+       4 quoted names keep their exact spelling.
+       5 """
+       6 import re
+       8
+       9 import sqlglot
+      10 from sqlglot import exp
+     … +146 lines (ctrl+o to expand)
+
+⏺ The schema loader is finished, so next I'll write the eight DDL files, each
+  combining a structural shape, naming convention, quoting style, and
+  binary-flag encoding, with a README matrix laying it all out.
+⏺ Write(dataset/schemas/campus.sql)
+  ⎿  Wrote 65 lines to dataset/schemas/campus.sql
+       1 -- campus: university registrar
+       2 -- Shape:    many-to-many (students <-> courses via enrollments,
+          courses <-> instructors via
+         -many (course_prerequisites)
+       4 -- Naming:   snake_case, unquoted, plural table names
+       5 -- Flags:    SMALLINT 0/1 with CHECK constraints
+       6 -- Generic:  id / name / department_id appear in several tables
+       8 CREATE TABLE departments (
+       9     id          INTEGER PRIMARY KEY,
+      10     name        VARCHAR(100) NOT NULL UNIQUE,
+     … +70 lines (ctrl+o to expand)
+
+⏺ Write(dataset/schemas/org_chart.sql)
+  ⎿  Wrote 54 lines to dataset/schemas/org_chart.sql
+      1 -- org_chart: company HR directory
+        Employee, Department.ParentDepartmentId
+      3 --           -> Department) plus a self-referential many-to-many
+        (Mentorship)
+        uoted in queries), singular tables
+      5 -- Flags:    PostgreSQL ENUM types ("RemoteFlag" 'Yes'/'No'; "Emp
+      6 -- Generic:  "Id" / "Name" / "Salary" appear in several tables
+      7
+      8 CREATE TYPE "EmploymentStatus" AS ENUM ('Active', 'OnLeave', 'Ter
+      9 CREATE TYPE "RemoteFlag" AS ENUM ('Yes', 'No');
+     … +57 lines (ctrl+o to expand)
+
+⏺ Write(dataset/schemas/social_graph.sql)
+  ⎿  Wrote 52 lines to dataset/schemas/social_graph.sql
+       1 -- social_graph: microblogging network
+         sers), self-referential reply
+       3 --           threads (posts.replyToPostId -> posts), many-to-man
+         y (posts <-> hashTags)
+         uoted in queries)
+       5 -- Flags:    VARCHAR 'on'/'off' with CHECK constraints
+         les
+       7
+       8 CREATE TABLE "users" (
+      10     "userName"            VARCHAR(50) NOT NULL UNIQUE,
+     … +53 lines (ctrl+o to expand)
+
+⏺ Write(dataset/schemas/sales_star.sql)
+  ⎿  Wrote 63 lines to dataset/schemas/sales_star.sql
+       1 -- sales_star: retail data warehouse, star schema
+       2 -- Shape:    star (one fact table, denormalized single-hop dimen
+         sions; category/region are
+       4 -- Naming:   snake_case, unquoted, fact_/dim_ prefixes, *_key su
+         rrogate keys
+       5 -- Flags:    SMALLINT 0/1 with CHECK constraints
+       6 -- Generic:  name / city / country appear in several dimensions
+       8 CREATE TABLE dim_date (
+       9     date_key     INTEGER PRIMARY KEY,                -- yyyymmdd
+      10     full_date    DATE NOT NULL UNIQUE,
+     … +67 lines (ctrl+o to expand)
+
+⏺ Write(dataset/schemas/sales_snowflake.sql)
+  ⎿  Wrote 92 lines to dataset/schemas/sales_snowflake.sql
+       1 -- sales_snowflake: retail data warehouse, snowflake schema
+         mension hierarchies:
+       3 --           Product -> Subcategory -> Category, Store -> City -
+         > Country -> Region,
+       5 -- Naming:   PascalCase, UNquoted -- PostgreSQL folds these to l
+         owercase, so DimProduct,
+       7 -- Flags:    PostgreSQL ENUM type ActiveFlag ('active'/'inactive
+         ')
+       8 -- Generic:  Name appears in nearly every dimension
+      10 CREATE TYPE ActiveFlag AS ENUM ('active', 'inactive');
+     … +96 lines (ctrl+o to expand)
+
+⏺ Write(dataset/schemas/library.sql)
+  ⎿  Wrote 77 lines to dataset/schemas/library.sql
+       1 -- library: public lending library
+       2 -- Shape:    many-to-many (books <-> authors via bookAuthors, bo
+       3 --           plus self-references (books.sequelOfId -> books, ge
+         nres.parentGenreId -> genres)
+       4 -- Naming:   camelCase, UNquoted -- PostgreSQL folds these to lo
+       5 --           bookauthors name the same table
+       6 -- Flags:    VARCHAR 'on'/'off' with CHECK constraints
+       7 -- Generic:  id / name / bookId appear in several tables
+       9 CREATE TABLE authors (
+      10     id           INTEGER PRIMARY KEY,
+     … +86 lines (ctrl+o to expand)
+
+⏺ Write(dataset/schemas/web_analytics.sql)
+  ⎿  Wrote 61 lines to dataset/schemas/web_analytics.sql
+       1 -- web_analytics: clickstream warehouse, star schema with two fa
+       2 -- Shape:    star (factPageView and factOrder share conformed di
+         mensions dimDate / dimVisitor /
+       4 -- Naming:   camelCase, double-quoted (case-sensitive; must be q
+         uoted in queries), fact/dim prefixes
+       6 -- Generic:  "dateKey" / "visitorKey" / "campaignKey" appear in
+         both fact tables
+       8 CREATE TABLE "dimDate" (
+       9     "dateKey"       INTEGER PRIMARY KEY,                    -- y
+      10     "calendarDate"  DATE NOT NULL UNIQUE,
+     … +74 lines (ctrl+o to expand)
+
+⏺ Write(dataset/schemas/project_tracker.sql)
+  ⎿  Wrote 84 lines to dataset/schemas/project_tracker.sql
+       1 -- project_tracker: issue / project management tool
+         s, tasks <-> labels via task_labels),
+       3 --           self-references (tasks.parent_task_id -> tasks) and
+       4 --           (task_dependencies)
+       5 -- Naming:   snake_case, unquoted
+         us, member_role)
+       7 -- Generic:  id / name / created_at / team_id appear in several
+       8
+       9 CREATE TYPE yes_no AS ENUM ('yes', 'no');
+         ', 'done');
+     … +89 lines (ctrl+o to expand)
+
+⏺ Before writing any queries, I'll check that all eight schemas pass Postgres's
+  parser and load into the catalog correctly.
+
+⏺ Bash(rm -f dataset/schemas/.gitkeep && .venv/bin/python - <<'EOF' 2>&1 | grep
+      -v "unsupported syntax"
+      import pglast, pathlib…)
+  ⎿  Deleted dataset/schemas/.gitkeep (+0 -0)
+
+⏺ All 8 schemas parse correctly and case folding works as expected (e.g.,
+  bookAuthors → bookauthors, while "Employee" stays capitalized). Now I'll write
+  the questions and target SQL, one file per schema, in generator/queries/.
+
+⏺ Write(generator/queries/campus.py)
+  ⎿  Wrote 150 lines to generator/queries/campus.py
+       1 SCHEMA_ID = "campus"
+       2
+       3 # (question, target_sql, extra_tags)
+       4 QUERIES = [
+       5     ("List the names of all currently active students.",
+       7      ["flag_int"]),
+       8
+       9     ("Show each course's name alongside the name of the departme
+         nt that offers it.",
+      10      """SELECT courses.name, departments.name
+     … +168 lines (ctrl+o to expand)
+
+⏺ Write(generator/queries/org_chart.py)
+  ⎿  Wrote 145 lines to generator/queries/org_chart.py
+       1 SCHEMA_ID = "org_chart"
+       2
+       3 QUERIES = [
+         manager's name.",
+       5      """SELECT e."Name" AS employee, m."Name" AS manager
+       6 FROM "Employee" e
+       7 JOIN "Employee" m ON m."Id" = e."ManagerId\"""",
+       9
+      10     ("List all employees and their manager's name; employees wit
+         h no manager should still appear with an empty manager.",
+     … +159 lines (ctrl+o to expand)
+
+⏺ Write(generator/queries/social_graph.py)
+  ⎿  Wrote 138 lines to generator/queries/social_graph.py
+       1 SCHEMA_ID = "social_graph"
+       2
+       3 QUERIES = [
+       4     ("What are the usernames of everyone who follows the user 'a
+         lice'?",
+       6 FROM "follows" f
+       7 JOIN "users" u ON u."id" = f."followerId"
+       8 JOIN "users" a ON a."id" = f."followeeId"
+       9 WHERE a."userName" = 'alice'""",
+      10      ["self_m2m", "self_join"]),
+     … +152 lines (ctrl+o to expand)
+
+⏺ Write(generator/queries/sales_star.py)
+  ⎿  Wrote 163 lines to generator/queries/sales_star.py
+       1 SCHEMA_ID = "sales_star"
+       2
+       3 QUERIES = [
+       4     ("What was total revenue (quantity times unit price) for eac
+         h year? Order by year.",
+       6 FROM fact_sales f
+       7 JOIN dim_date d ON d.date_key = f.date_key
+       8 GROUP BY d.year
+       9 ORDER BY d.year""",
+      10      ["star"]),
+     … +175 lines (ctrl+o to expand)
+
+⏺ Write(generator/queries/sales_snowflake.py)
+  ⎿  Wrote 171 lines to generator/queries/sales_snowflake.py
+       1 SCHEMA_ID = "sales_snowflake"
+       2
+         lowercase.
+       4 QUERIES = [
+       5     ("What is total revenue (quantity times unit price) by produ
+       6      """SELECT cat.Name, SUM(f.Quantity * f.UnitPrice) AS Revenu
+         e
+       7 FROM FactOrderLine f
+       9 JOIN DimSubcategory sc ON sc.SubcategoryId = p.SubcategoryId
+      10 JOIN DimCategory cat ON cat.CategoryId = sc.CategoryId
+     … +183 lines (ctrl+o to expand)
+
+⏺ Write(generator/queries/library.py)
+  ⎿  Wrote 141 lines to generator/queries/library.py
+       1 SCHEMA_ID = "library"
+       2
+       3 # Identifiers are unquoted camelCase; PostgreSQL folds them to l
+       4 QUERIES = [
+       5     ("List each book title with the full name of each of its aut
+         hors.",
+       6      """SELECT b.title, a.fullName
+       8 JOIN bookAuthors ba ON ba.bookId = b.id
+       9 JOIN authors a ON a.id = ba.authorId""",
+      10      ["m2m"]),
+     … +150 lines (ctrl+o to expand)
+
+⏺ Write(generator/queries/web_analytics.py)
+  ⎿  Wrote 141 lines to generator/queries/web_analytics.py
+      1 SCHEMA_ID = "web_analytics"
+      2
+      3 QUERIES = [
+      4     ("How many page views did each site section get?",
+      5      """SELECT p."section", COUNT(*) AS views
+      6 FROM "factPageView" v
+      7 JOIN "dimPage" p ON p."pageKey" = v."pageKey"
+      8 GROUP BY p."section\"""",
+      9      ["star"]),
+     … +156 lines (ctrl+o to expand)
+
+⏺ Write(generator/queries/project_tracker.py)
+  ⎿  Wrote 144 lines to generator/queries/project_tracker.py
+       1 SCHEMA_ID = "project_tracker"
+       2
+       3 QUERIES = [
+       4     ("How many open (not done) tasks does each project have? Sho
+         w project name and count.",
+       6 FROM projects p
+       7 JOIN tasks t ON t.project_id = p.id
+       8 WHERE t.status <> 'done'
+       9 GROUP BY p.id, p.name""",
+      10      ["flag_enum", "generic_names"]),
+     … +153 lines (ctrl+o to expand)
+
+⏺ The query files are written: 157 questions across the 8 schemas. Next is the
+  build script that checks every target query and writes queries.jsonl.
+
+⏺ Write(generator/schema_meta.py)
+  ⎿  Wrote 20 lines to generator/schema_meta.py
+       1 """Deliberate variation axes for each schema. Used for tagging a
+       2
+       4     "campus":          {"shape": ["many_to_many", "self_ref_m2m"
+         ], "naming": "snake_case",
+         "},
+         naming": "PascalCase",
+       8     "social_graph":    {"shape": ["self_ref_m2m", "self_ref", "m
+         any_to_many"], "naming": "camelCase",
+         ff"},
+         ",
+     … +19 lines (ctrl+o to expand)
+
+⏺ Write(generator/build_queries.py)  ⎿  Wrote 126 lines to generator/build_queries.py
+       1 """Validate the hand-authored schemas and target queries and wri
+       2
+       3 Run from the repo root:  python -m generator.build_queries
+       4
+         very target query must be
+       6 exactly one SELECT that parses with pglast and whose tables and
+       7 against its schema under PostgreSQL case folding (sqlglot qualif
+         y).
+       8 """
+      10 import json
+     … +131 lines (ctrl+o to expand)
+
+⏺ Bash(rm -f generator/.gitkeep && touch generator/__init__.py
+      generator/queries/__init__.py && .venv/bin/python -m
+      generator.build_queries 2>&1 | grep -v "unsupported…)
+  ⎿  Deleted generator/.gitkeep (+0 -0)
+  ⎿  Created generator/__init__.py (+0 -0)
+  ⎿  Created generator/queries/__init__.py (+0 -0)
+  ⎿  … 1 more file changed
+
+⏺ All 157 passed on the first run, which makes me suspicious that the validator
+  is too lenient. I'll feed it some queries that should fail, especially
+  case-folding mistakes.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The validator correctly handles Postgres case folding, but I found a gap:
+  queries referencing nonexistent tables without columns, like SELECT COUNT(*)
+  FROM employee, slip through. I'll add an explicit check that every table
+  exists.
+
+⏺ Update(generator/build_queries.py)
+  ⎿  Added 5 lines
+      71      if len(stmts) != 1 or type(stmts[0].stmt).__name__ != "Sele
+          ctStmt":
+      72          raise ValueError("target must be exactly one SELECT sta
+          tement")
+      73      tree = sqlglot.parse_one(sql, read="postgres")
+      74 +    cte_names = {norm_ident(c.args["alias"].this) for c in tree
+         +.find_all(exp.CTE)}                                            
+      75 +    for t in tree.find_all(exp.Table):                         
+      76 +        name = norm_ident(t.this)                              
+      77 +        if name not in cte_names and not schema.find(exp.table_
+         +(exp.to_identifier(name, quoted=True))):                       
+      78 +            raise ValueError(f"unknown table {name!r}")        
+      79      qualify(tree.copy(), schema=schema, dialect="postgres",
+      80              validate_qualify_columns=True, quote_identifiers=Fa
+          lse)
+      81      return tree
+
+⏺ Update(generator/build_queries.py)
+  ⎿  Added 1 line, removed 1 line
+      20  
+      21  from generator import queries as queries_pkg
+      22  from generator.schema_meta import SCHEMA_META
+      23 -from sqleval.schema import load_catalog                        
+      23 +from sqleval.schema import load_catalog, norm_ident            
+      24  
+      25  ROOT = Path(__file__).resolve().parent.parent
+      26  SCHEMAS_DIR = ROOT / "dataset" / "schemas"
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ I'll prefix the schema-level tags (shape:, naming:, quoting:, flags:) to avoid
+  confusion with per-query tags, then review how well the tags cover the
+  different query patterns.
+
+⏺ Bash(.venv/bin/python - <<'EOF'
+      import re, pathlib…)
+  ⎿  Updated generator/build_queries.py (+2 -1)
+       98          catalog = load_catalog(ddl)
+       99          schema = MappingSchema(catalog.sqlglot_schema(), diale
+           ct="postgres", normalize=False)
+      100          meta = SCHEMA_META[sid]
+      101 -        schema_tags = [*meta["shape"], meta["naming"], meta["q
+          -uoting"], f"flags_{meta['flags']}"]                           
+      101 +        schema_tags = [*(f"shape:{s}" for s in meta["shape"]),
+          + f"naming:{meta['naming']}",                                  
+      102 +                       f"quoting:{meta['quoting']}", f"flags:{
+          +meta['flags']}"]                                              
+      103  
+      104          seen_questions = set()
+      105          for i, (question, sql, extra_tags) in enumerate(mod.QU
+           ERIES, start=1):
+  ⎿  Created generator/requirements.txt (+1 -0)
+      1 +pglast==8.6                                                     
+  ⎿  … 1 more file changed
+
+⏺ Coverage checks out evenly at 19–20 queries per schema, and the set_op count
+  of 6 reflects the 5 recursive CTE UNIONs plus 1 EXCEPT. Now I'll fill in the
+  README's dataset section.
+
+⏺ Update(README.md)
+  ⎿  Added 71 lines, removed 2 lines
+       29  
+       30  ## Dataset design
+       31  
+       32 +All schemas and queries are PostgreSQL. The dataset has 8 sche
+          +mas and 157 natural-language                                  
+       33 +questions, each with a target SQL query (19–20 questions per s
+          +chema).                                                       
+       34 +                                                              
+       35  ### How schemas were varied
+       33 -_TODO_                                                        
+       36  
+       35 -### Queries and labeled pairs                                 
+       37 +Each schema is a deliberate combination of four variation axes
+          +. Each axis value appears in at                               
+       38 +least two schemas, so no single convention is tied to a single
+          + domain:                                                      
+       39 +                                                              
+       40 +| schema | shape | naming | quoting | binary flags |          
+       41 +|---|---|---|---|---|                                         
+       42 +| `campus` | many-to-many (students↔courses, courses↔instructo
+          +rs) + self-ref M:N (prerequisites) | snake_case | unquoted | `
+          +SMALLINT` 0/1 |                                               
+       43 +| `org_chart` | self-referential hierarchies (Employee→manager
+          +, Department→parent) + self-ref M:N (mentorship) | PascalCase 
+          +| **quoted** | `ENUM` (`'Yes'/'No'`) |                        
+       44 +| `social_graph` | self-ref M:N (follows) + self-ref reply thr
+          +eads + M:N (hashtags) | camelCase | **quoted** | `VARCHAR` `'o
+          +n'/'off'` |                                                   
+       45 +| `sales_star` | **star**: one fact, flat single-hop dimension
+          +s | snake_case (`fact_`/`dim_`, `*_key`) | unquoted | `SMALLIN
+          +T` 0/1 |                                                      
+       46 +| `sales_snowflake` | **snowflake**: Product→Subcategory→Categ
+          +ory, Store→City→Country→Region | PascalCase | unquoted (folds 
+          +to lowercase) | `ENUM` (`'active'/'inactive'`) |              
+       47 +| `library` | M:N (books↔authors, books↔genres) + self-ref (se
+          +quels, genre tree) | camelCase | unquoted (folds to lowercase)
+          + | `VARCHAR` `'on'/'off'` |                                   
+       48 +| `web_analytics` | **star** with two fact tables sharing conf
+          +ormed dimensions | camelCase (`fact`/`dim`) | **quoted** | `SM
+          +ALLINT` 0/1 |                                                 
+       49 +| `project_tracker` | M:N (users↔projects, tasks↔labels) + sel
+          +f-ref (subtasks) + self-ref M:N (dependencies) | snake_case | 
+          +unquoted | `ENUM` (`yes_no`, `task_status`) |                 
+       50 +                                                              
+       51 +- **Shape.** Many-to-many junction tables, often with a compos
+          +ite primary key. Self-referential                             
+       52 +  foreign keys, which call for self-joins and recursive CTEs. 
+          +Self-referential many-to-many                                 
+       53 +  tables. Star schemas, where a fact table reaches each dimens
+          +ion in one hop. Snowflake schemas,                            
+       54 +  where a query needs 3–5 joins to reach a dimension attribute
+          +.                                                             
+       55 +- **Naming and quoting.** Each convention is used both quoted 
+          +and unquoted, because PostgreSQL                              
+       56 +  treats the two very differently:                            
+       57 +  - In quoted schemas (`"Employee"."ManagerId"`, `"postLikes".
+          +"userId"`), names are                                         
+       58 +    case-sensitive and every reference has to be quoted.      
+       59 +  - In unquoted PascalCase or camelCase schemas (`DimProduct`,
+          + `bookAuthors`), names fold to                                
+       60 +    lowercase, so `DimProduct`, `dimproduct` and `DIMPRODUCT` 
+          +all refer to the same table.                                  
+       61 +- **Generic column names.** Columns like `id`, `name`, `"Name"
+          +`, `created_at`, `team_id` and                                
+       62 +  `"dateKey"` are repeated across tables. Queries therefore ha
+          +ve to qualify columns                                         
+       63 +  (`courses.name` vs `departments.name`), and a query that pic
+          +ks the wrong table's `name` is                                
+       64 +  still valid SQL but gives a different answer.               
+       65 +- **Nullable columns.** Each schema has columns that are nulla
+          +ble on purpose: optional                                      
+       66 +  attributes, a self-reference that is NULL at the top of a hi
+          +erarchy, a NULL meaning "not                                  
+       67 +  returned yet" or "not graded yet", optional foreign keys and
+          + nullable measures. Queries                                   
+       68 +  exercise `IS NULL`, `COALESCE`, `COUNT(col)` vs `COUNT(*)`, 
+          +outer joins, and NULL groups in                               
+       69 +  `GROUP BY`.                                                 
+       70 +- **Binary state.** Two-valued flags are stored three differen
+          +t ways: `SMALLINT` with                                       
+       71 +  `CHECK (x IN (0, 1))`, `VARCHAR` with `CHECK (x IN ('on', 'o
+          +ff'))`, and PostgreSQL `ENUM`                                 
+       72 +  types.                                                      
+       73 +                                                              
+       74 +### Queries                                                   
+       75 +                                                              
+       76 +`dataset/queries.jsonl` records have `id` (`<schema>_<nnn>`), 
+          +`schema_id`, `question`, `sql` and                            
+       77 +`tags`. Tags come from three sources:                         
+       78 +- Derived from the SQL's syntax tree: `join`, `multi_join`, `a
+          +ggregation`, `having`, `subquery`,                            
+       79 +  `cte`, `recursive_cte`, `window`, `set_op`, `order_by`, `lim
+          +it`, `exists`, `distinct`,                                    
+       80 +  `null_handling`.                                            
+       81 +- Hand-assigned: `self_join`, `m2m`, `anti_join`, `integer_div
+          +ision`, `generic_names`,                                      
+       82 +  `nullable`, `flag_int`/`flag_onoff`/`flag_enum`, `distinct_o
+          +n`, `top_k`.                                                  
+       83 +- Inherited from the schema: `shape:*`, `naming:*`, `quoting:*
+          +`, `flags:*`.                                                 
+       84 +                                                              
+       85 +The questions and SQL were written with an LLM agent (see `ses
+          +sion/`) as Python data in                                     
+       86 +`generator/queries/<schema>.py`. `generator/build_queries.py` 
+          +validates them and writes the                                 
+       87 +JSONL file:                                                   
+       88 +                                                              
+       89 +```bash                                                       
+       90 +pip install -r generator/requirements.txt   # pglast: PostgreS
+          +QL's real parser (generator-only)                             
+       91 +python -m generator.build_queries                             
+       92 +```                                                           
+       93 +                                                              
+       94 +The build fails, and `queries.jsonl` is not written, if any of
+          + these checks fail:                                           
+       95 +1. Every schema file parses with `pglast` (libpg_query, the pa
+          +rser from PostgreSQL itself).                                 
+       96 +2. Every target is exactly one `SELECT` statement and parses w
+          +ith `pglast`.                                                 
+       97 +3. Every table and column a target references resolves against
+          + its schema under PostgreSQL                                  
+       98 +   identifier folding (sqlglot `qualify`). This catches unquot
+          +ed references to quoted                                       
+       99 +   camelCase columns, ambiguous generic columns, and typos.   
+      100 +                                                              
+      101 +No database is available at generation time, so the targets ar
+          +e checked statically but have                                 
+      102 +not been executed.                                            
+      103 +                                                              
+      104 +### Labeled pairs                                             
+      105  _TODO_
+      106  
+      107  ## How scoring works
+
+⏺ I wrote 8 schemas and 157 questions with target SQL, and the README now
+  explains how the schemas were varied. Every target query passes a validation
+  step that runs as part of the build.
+
+  Schemas (dataset/schemas/). Each schema mixes one value from each of your
+  variation axes, and each value appears in at least two schemas:
+
+  ┌─────────────────┬────────────────────────────┬─────────────┬────────────┐
+  │     schema      │           shape            │   naming    │  binary    │
+  │                 │                            │             │   flags    │
+  ├─────────────────┼────────────────────────────┼─────────────┼────────────┤
+  │                 │ many-to-many, plus a       │             │            │
+  │ campus          │ self-referencing           │ snake_case  │ int 0/1    │
+  │                 │ many-to-many for           │             │            │
+  │                 │ prerequisites              │             │            │
+  ├─────────────────┼────────────────────────────┼─────────────┼────────────┤
+  │                 │ self-referencing           │             │            │
+  │ org_chart       │ (employee→manager,         │ PascalCase, │ enum       │
+  │                 │ department→parent          │  quoted     │            │
+  │                 │ department)                │             │            │
+  ├─────────────────┼────────────────────────────┼─────────────┼────────────┤
+  │                 │ self-referencing           │ camelCase,  │            │
+  │ social_graph    │ many-to-many (follows),    │ quoted      │ 'on'/'off' │
+  │                 │ reply threads              │             │            │
+  ├─────────────────┼────────────────────────────┼─────────────┼────────────┤
+  │ sales_star      │ star                       │ snake_case  │ int 0/1    │
+  ├─────────────────┼────────────────────────────┼─────────────┼────────────┤
+  │                 │ snowflake (up to 4 hops,   │ PascalCase, │            │
+  │ sales_snowflake │ e.g.                       │  unquoted   │ enum       │
+  │                 │ store→city→country→region) │             │            │
+  ├─────────────────┼────────────────────────────┼─────────────┼────────────┤
+  │                 │ many-to-many, plus         │ camelCase,  │            │
+  │ library         │ self-references (sequels,  │ unquoted    │ 'on'/'off' │
+  │                 │ genre tree)                │             │            │
+  ├─────────────────┼────────────────────────────┼─────────────┼────────────┤
+  │ web_analytics   │ star with 2 fact tables    │ camelCase,  │ int 0/1    │
+  │                 │                            │ quoted      │            │
+  ├─────────────────┼────────────────────────────┼─────────────┼────────────┤
+  │                 │ many-to-many, plus         │             │            │
+  │ project_tracker │ self-referencing subtasks  │ snake_case  │ enum       │
+  │                 │ and dependencies           │             │            │
+  └─────────────────┴────────────────────────────┴─────────────┴────────────┘
+
+  - Quoting: I varied this on purpose because Postgres treats the two cases very
+    differently. Quoted names like "Employee"."ManagerId" must be written
+    exactly that way. Unquoted ones like DimProduct fold to lowercase, so
+    dimproduct refers to the same table.
+  - Generic names: columns like id, name and created_at repeat across tables, so
+    queries have to say which table they mean (courses.name vs
+    departments.name).
+  - Nullable columns: each schema has some on purpose, such as a manager ID that
+    is empty for the CEO, or a grade that is empty until the course is graded.
+
+  Queries: dataset/queries.jsonl has 19–20 questions per schema. They cover
+  joins through junction tables, self-joins, recursive queries over the
+  hierarchies, finding rows with no match, window functions, DISTINCT ON, NULL
+  handling, the three flag styles, and integer division (e.g. 100.0 * SUM(flag)
+  / COUNT(*)). Tags come from three places: the SQL's structure, hand-assigned
+  labels, and the schema's variation axes.
+
+  Validation: generator/build_queries.py builds the file and refuses to write it
+  if any check fails. Every schema and target must parse with pglast, which is
+  Postgres's own parser. Each target must be exactly one SELECT, and every table
+  and column it uses must exist under Postgres case-folding rules. I tested the
+  checks with deliberately broken queries (unquoted userName against a quoted
+  schema, a wrong-case quoted name, an ambiguous name, a misspelled column, an
+  unknown table) and all were rejected. pglast is listed in
+  generator/requirements.txt only, so the harness doesn't depend on it.
+
+  Not yet verified: no Postgres server is installed here, so none of the targets
+  have actually been run. The checks confirm the queries are valid and
+  reference real tables and columns, but not that each one answers its question.
+  Reading through the questions in queries.jsonl would catch any that don't
+  match their SQL.
+
+  Nothing is committed yet. Still to do for the dataset is pairs.jsonl, the
+  labeled pairs of matching and near-miss queries. The README has a placeholder
+  section for it.
+
+❯ <ide_opened_file>The user opened the file
+  /Users/kartikuppalapati/Documents/Projects/SQL-Checker/dataset/queries.jsonl
+  in the IDE. This may or may not be related to the current
+  task.</ide_opened_file>
+
+❯ Okay now lets generate the pairs for each query in queries.jsonl
+
+  we have to use format for pairs.josnl as outlined from the document
+
+⏺ I'll generate the pairs in three layers so they cover both obvious and subtle
+  cases:
+
+  1. Hand-written pairs: about 3 per query. These are realistic rewrites a model
+     might produce, plus near-misses built around specific Postgres pitfalls:
+     NOT IN against a nullable column, COUNT(*) vs COUNT(col) after an outer
+     join, integer division, DISTINCT merging rows that share a name, enum
+     domains, and keys that make two queries equivalent.
+  2. Automatic mutations: changes that preserve meaning (rename aliases, change
+     case, reorder conditions, add ORDER BY when the ground truth has none,
+     switch to implicit joins) and changes that break it (flip a comparison,
+     drop a filter, change LEFT to INNER, swap columns, and so on). Each type of
+     change only runs when the query has the shape that makes its label
+     certain.
+  3. Invalid predictions: null, empty string, SQL wrapped in markdown fences,
+     two statements, plain prose, truncated SQL, MySQL backticks, a DELETE.
+
+  Every prediction labeled equivalent has to pass the same validator as the
+  target queries, so a typo can't end up labeled as a match. I'll start with the
+  mutation engine.
+
+⏺ Write(generator/mutations.py)
+  ⎿  Wrote 487 lines to generator/mutations.py
+       1 """Automatic rewrites of a target query, each with a known equiv
+       2
+       3 Equivalence-preserving rewrites are either purely cosmetic (chec
+       4 is unchanged) or structural rewrites that are sound by construct
+       5 reordering, inner join <-> implicit join, adding ORDER BY when t
+         he target has none).
+       7 Breaking rewrites are only applied where they cannot accidentall
+         y preserve semantics on every
+         ed against literals, LEFT JOIN
+      10 """
+     … +527 lines (ctrl+o to expand)
+
+⏺ Before writing the hand pairs, I'll check how often sqlglot reproduces each
+  target query exactly. The structural mutations only run on queries where it
+  does.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ 146 of 157 queries match exactly; the 11 misses are just sqlglot rewriting IS
+  NOT NULL as NOT x IS NULL and uppercasing the unit in date_trunc. I'll
+  normalize the first as equivalent in the comparison but keep flagging the
+  date_trunc case.
+
+⏺ Update(generator/mutations.py)
+  ⎿  Added 6 lines
+      29  
+      30  def _strip_locations(o):
+      31      if isinstance(o, dict):
+      32 +        # NOT (x IS NULL)  ==  x IS NOT NULL  (sqlglot renders 
+         +the latter as the former)                                      
+      33 +        b = o.get("BoolExpr")                                  
+      34 +        if b and b.get("boolop") == "NOT_EXPR" and len(b.get("a
+         +rgs", [])) == 1 and "NullTest" in b["args"][0]:                
+      35 +            nt = dict(b["args"][0]["NullTest"])                
+      36 +            nt["nulltesttype"] = "IS_NOT_NULL" if nt.get("nullt
+         +esttype") == "IS_NULL" else "IS_NULL"                          
+      37 +            return _strip_locations({"NullTest": nt})          
+      38          return {k: _strip_locations(v) for k, v in o.items()
+      39                  if k not in ("location", "stmt_location", "stmt
+          _len")}
+      40      if isinstance(o, list):
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The mutations are working correctly—156 of 157 targets now round-trip exactly.
+  Next I'll go through the hand-written pairs, each annotated with a note
+  explaining why it is or isn't equivalent, since these subtle cases are key for
+  testing the harness.
+
+⏺ Write(generator/pairs/campus.py)
+  ⎿  Wrote 199 lines to generator/pairs/campus.py
+       1 """Hand-written labeled predictions for campus queries, keyed by
+          query number.
+       3 Each entry: (equivalent, predicted_sql, why). A note starting wi
+         th "INVALID:" marks a
+       4 prediction that is expected to fail to parse or resolve against
+       5 """
+       6 E, N = True, False
+       7
+       9     1: [
+      10         (E, 'SELECT "name" FROM "students" WHERE is_active = 1',
+     … +314 lines (ctrl+o to expand)
+
+⏺ Write(generator/pairs/org_chart.py)
+  ⎿  Wrote 190 lines to generator/pairs/org_chart.py
+       1 """Hand-written labeled predictions for org_chart queries. See c
+       2 E, N = True, False
+       3
+       5     1: [
+       6         (E, '''SELECT e."Name", (SELECT m."Name" FROM "Employee"
+         gerId" IS NOT NULL''',
+       7          "scalar subquery: FK guarantees the manager exists"),
+         JOIN "Employee" m ON m."Id" = e."ManagerId"''',
+       9          "LEFT JOIN keeps the CEO with a NULL manager"),
+         "Employee" m ON e."Id" = m."ManagerId"''',
+     … +293 lines (ctrl+o to expand)
+
+⏺ Write(generator/pairs/social_graph.py)
+  ⎿  Wrote 158 lines to generator/pairs/social_graph.py
+       1 """Hand-written labeled predictions for social_graph queries. Se
+       2 E, N = True, False
+       3
+       5     1: [
+         N (SELECT "followerId" FROM "follows" WHERE "followeeId" = (SELE
+         CT "id" FROM "users" WHERE "userName" = 'alice'))''',
+         lows PK means IN and JOIN agree"),
+       8         (N, '''SELECT u."userName" FROM "follows" f JOIN "users"
+         owerId" WHERE a."userName" = 'alice\'''',
+      10         (N, '''SELECT u."userName" FROM "follows" f
+     … +257 lines (ctrl+o to expand)
+
+⏺ Write(generator/pairs/sales_star.py)
+  ⎿  Wrote 189 lines to generator/pairs/sales_star.py
+       1 """Hand-written labeled predictions for sales_star queries. See
+       2 E, N = True, False
+       4 PAIRS = {
+       5     1: [
+         dim_date d JOIN fact_sales f ON f.date_key = d.date_key GROUP BY
+       7          "commuted product, ordinal ORDER BY"),
+         fact_sales f JOIN dim_date d ON d.date_key = f.date_key GROUP BY
+          d.year",
+      10         (N, "SELECT d.year, SUM(f.quantity) * SUM(f.unit_price)
+         UP BY d.year ORDER BY d.year",
+     … +309 lines (ctrl+o to expand)
+
+⏺ Write(generator/pairs/sales_snowflake.py)
+  ⎿  Wrote 176 lines to generator/pairs/sales_snowflake.py
+      1 """Hand-written labeled predictions for sales_snowflake queries.
+      2 E, N = True, False
+      4 PAIRS = {
+      5     1: [
+        factorderline f join dimproduct p on p.productid = f.productid jo
+        imcategory cat on cat.categoryid = sc.categoryid group by cat.nam
+      7          "all-lowercase identifiers fold identically; category Na
+        me is UNIQUE NOT NULL"),
+        "FactOrderLine" f JOIN DimProduct p ON p.ProductId = f.ProductId
+         Dim
+     … +304 lines (ctrl+o to expand)
+⏺ Write(generator/pairs/library.py)
+  ⎿  Wrote 170 lines to generator/pairs/library.py
+       1 """Hand-written labeled predictions for library queries. See cam
+       2 E, N = True, False
+       4 PAIRS = {
+       6         (E, "select b.title, a.fullname from books b join bookau
+         d",
+         s"),
+         uthors" ba ON ba.bookId = b.id JOIN authors a ON a.id = ba.autho
+       9          "INVALID: quoted \"bookAuthors\" is case-sensitive; the
+      10         (N, "SELECT b.title, string_agg(a.fullName, ', ') FROM b
+          a.id = b
+     … +241 lines (ctrl+o to expand)
+
+⏺ Write(generator/pairs/web_analytics.py)
+  ⎿  Wrote 158 lines to generator/pairs/web_analytics.py
+       1 """Hand-written labeled predictions for web_analytics queries. S
+       2 E, N = True, False
+       3
+       5     1: [
+         ge" p JOIN "factPageView" v ON v."pageKey" = p."pageKey" GROUP B
+         Y 1''',
+       8         (N, '''SELECT p."section", COUNT(v."viewId") FROM "dimPa
+         ge" p LEFT JOIN "factPageView" v ON v."pageKey" = p."pageKey" GR
+       9          "sections with no views appear with 0"),
+          dimPage p ON p.pageKey = v.pageKey GROUP BY p.section",
+     … +276 lines (ctrl+o to expand)
+
+⏺ Write(generator/pairs/project_tracker.py)
+  ⎿  Wrote 177 lines to generator/pairs/project_tracker.py
+       1 """Hand-written labeled predictions for project_tracker queries.
+       2 E, N = True, False
+       4 PAIRS = {
+       5     1: [
+         t ON t.project_id = p.id WHERE t.status IN ('todo', 'in_progress
+       7          "task_status has exactly these four labels and status i
+       8         (N, "SELECT p.name, COUNT(*) FROM projects p JOIN tasks
+         t ON t.project_id = p.id WHERE t.status = 'todo' GROUP BY p.id,
+       9          "only todo, not in_progress/blocked"),
+         N tasks t ON t.project_id = p.id AND t.status <> 'done' GROU
+     … +264 lines (ctrl+o to expand)
+
+⏺ I've finished the hand-written pairs — about 3 per query, 507 total. Next I'll
+  build the script that merges these with the automatic mutations and malformed
+  predictions, validates every label, and writes out pairs.jsonl.
+
+⏺ Write(generator/build_pairs.py)
+  ⎿  Wrote 184 lines to generator/build_pairs.py
+      1 """Build dataset/pairs.jsonl from dataset/queries.jsonl.
+      3 Run from the repo root (after build_queries):  python -m generato
+        r.build_pairs
+      4
+      6   1. hand-written predictions from generator/pairs/<schema>.py (l
+        abel + reason written by hand)
+        ions.py, label True)
+      8   3. automatic breaking mutations                 (generator/muta
+        tions.py, label False)
+        statements, ...; label False)
+     … +207 lines (ctrl+o to expand)
+
+⏺ Bash(touch generator/pairs/__init__.py && .venv/bin/python -m
+      generator.build_pairs 2>&1 | grep -v "unsupported syntax")
+  ⎿  Created generator/pairs/__init__.py (+0 -0)
+  ⎿  … 1 more file changed
+
+⏺ The build passed all checks: 1,509 pairs total (651 equivalent, 858 not).
+  Since fewer hand-written pairs came through than expected, I'll check for any
+  that were dropped and spot-check the automatic negatives for correct labeling.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The sampled negatives were correctly labeled, but mutations skewed toward too
+  many easy cosmetic/structural cases, so I'll cap those per query and draw the
+  rest from semantic mutations. I'll also add a hard check that cosmetic
+  rewrites leave Postgres's parse tree unchanged, not just that they're valid.
+
+⏺ Bash(.venv/bin/python - <<'EOF'
+      import pathlib…)
+  ⎿  Updated generator/build_pairs.py (+24 -4)
+      42  AUTO_EQ_PER_QUERY = 3
+      43  AUTO_NEQ_PER_QUERY = 3
+      44  
+      45 +# Purely cosmetic rewrites: must leave the PostgreSQL parse tre
+         +e unchanged. At most one per query,                            
+      46 +# so the automatic positives are dominated by structural rewrit
+         +es.                                                            
+      47 +COSMETIC_EQ = {"trailing_semicolon", "leading_comment", "reform
+         +at_oneline", "reformat_pretty",                                
+      48 +               "lowercase", "uppercase", "neq_operator_style"} 
+      49 +# Shape/validity-only negatives (column count/order, identifier
+         + quoting). At most one per query,                              
+      50 +# so the automatic negatives are dominated by semantic mutation
+         +s.                                                             
+      51 +STRUCTURAL_NEQ = {"swap_columns", "drop_column", "unquote_ident
+         +ifiers", "quote_identifiers"}                                  
+      52 +                                                               
+      53 +                                                               
+      54 +def tiered(names, rng, low_tier, low_quota):                   
+      55 +    """Shuffle, then order: high-tier names first, `low_quota` 
+         +low-tier names next, remaining low-tier last."""               
+      56 +    names = list(names)                                        
+      57 +    rng.shuffle(names)                                         
+      58 +    high = [n for n in names if n not in low_tier]             
+      59 +    low = [n for n in names if n in low_tier]                  
+      60 +    return low[:low_quota] + high + low[low_quota:]            
+      61 +                                                               
+      62  
+      63  def ddl_names(ddl: str) -> set[str]:
+      64      """Mixed-case table and column names as spelled in an unquo
+          ted DDL file."""
+     ...
+      138                 "naming": meta["naming"], "ddl_names": names}
+      139  
+      140          # 2. automatic equivalence-preserving rewrites
+      124 -        eq_names = list(EQ_MUTATIONS)                         
+      125 -        rng.shuffle(eq_names)                                 
+      141 +        eq_names = tiered(EQ_MUTATIONS, rng, COSMETIC_EQ, 1)  
+      142          taken = 0
+      143          for name in eq_names:
+      144              if taken >= AUTO_EQ_PER_QUERY:
+     ...
+      150                  print(f"{q['id']}: eq mutation {name} produced
+            invalid SQL\n    {out[:160]}")
+      151                  errors += 1
+      152                  continue
+      153 +            if name in COSMETIC_EQ and pg_ast(out) != gt_ast: 
+      154 +                print(f"{q['id']}: cosmetic mutation {name} ch
+          +anged the parse tree\n    {out[:160]}")                       
+      155 +                errors += 1                                   
+      156 +                continue                                      
+      157              emit(q, out, True, "auto", name, "equivalence-pres
+           erving rewrite")
+     … 10 more lines (ctrl+o to expand)
+  ⎿  … 1 more file changed
+
+⏺ Automatic positives now skew structural (ORDER BY, reordered conditions,
+  renamed aliases, implicit joins), while negatives are still about a third
+  swapped/dropped columns—mainly because shorter queries lack enough semantic
+  mutation options, so the fallback fills the gap. Next I'll verify the build is
+  deterministic and that ./score reads the file correctly.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The build is deterministic and produces a correctly formatted file that
+  ./score reads successfully across all 1,509 pairs; the stub scoring baseline
+  of 56.9% sets the floor to beat. Now I'll write the README.
+
+⏺ Update(README.md)
+  ⎿  Added 75 lines, removed 1 line
+      102  not been executed.
+      103  
+      104  ### Labeled pairs
+      105 -_TODO_                                                        
+      105  
+      106 +`dataset/pairs.jsonl` holds 1,509 pairs: 651 equivalent and 85
+          +8 not. Each pair uses the                                     
+      107 +required fields (`id`, `schema_id`, `ground_truth`, `predicted
+          +`, `equivalent`). For analysis,                               
+      108 +each pair also records `query_id`, `source`, `category` and a 
+          +`note` explaining the label; the                              
+      109 +harness ignores these. Every query in `queries.jsonl` contribu
+          +tes pairs from three sources:                                 
+      110 +                                                              
+      111 +| source | equivalent | not equivalent | what it is |         
+      112 +|---|---|---|---|                                             
+      113 +| `hand` | 180 | 293 | About 3 hand-written predictions per qu
+          +ery, each with a one-line reason for its label |              
+      114 +| `auto` | 471 | 408 | Mutations of the target generated from 
+          +its syntax tree (`generator/mutations.py`) |                  
+      115 +| `malformed` | 0 | 157 | One malformed prediction per query |
+      116 +                                                              
+      117 +**Hand-written pairs** (`generator/pairs/<schema>.py`) target 
+          +the cases a string or AST diff                                
+      118 +gets wrong.                                                   
+      119 +- *Equivalent but different:*                                 
+      120 +  - Rewriting `NOT EXISTS` as a `LEFT JOIN … IS NULL` or as `N
+          +OT IN` over a NOT NULL column.                                
+      121 +  - `EXCEPT`/`GROUP BY` on a UNIQUE NOT NULL column.          
+      122 +  - A `LEFT JOIN` along a NOT NULL foreign key, which is the s
+          +ame as an `INNER JOIN`.                                       
+      123 +  - Scalar subqueries over foreign keys.                      
+      124 +  - `<> 'No'` on a two-value NOT NULL enum.                   
+      125 +  - `ROW_NUMBER` vs `DISTINCT ON`.                            
+      126 +  - A redundant `IS NOT NULL` before a comparison or a scalar 
+          +`AVG`.                                                        
+      127 +  - `COUNT(*) - COUNT(col)`, `ROWS 6 PRECEDING`, `FETCH FIRST`
+          +.                                                             
+      128 +- *Near-misses:*                                              
+      129 +  - `NOT IN` over a nullable column (the `ManagerId` trap).   
+      130 +  - `COUNT(*)` vs `COUNT(col)` after an outer join.           
+      131 +  - Integer division (`100 * x / n`, `/ 1000`).               
+      132 +  - A date filter placed in `WHERE` instead of `ON` of a `LEFT
+          + JOIN`.                                                       
+      133 +  - Double `LEFT JOIN` fan-out.                               
+      134 +  - `DISTINCT`/`INTERSECT` merging rows that share a name, and
+          + grouping by a non-unique `name`.                             
+      135 +  - Case-sensitive enum or string literals, and `ILIKE` vs `=`
+          +.                                                             
+      136 +  - `NULLS FIRST` under `DESC … LIMIT`.                       
+      137 +  - `RANK` vs `ROW_NUMBER`.                                   
+      138 +  - A missing tie-break before `LIMIT`.                       
+      139 +  - The target has an `ORDER BY` but the prediction has none. 
+      140 +  - Generic `name`/`country` columns read from the wrong table
+          +.                                                             
+      141 +  - Columns with no constraint linking them, such as `quarter`
+          + vs `month IN (10, 11, 12)`.                                  
+      142 +                                                              
+      143 +**Automatic pairs** are chosen per query with an RNG seeded by
+          + the query id, so the build is                                
+      144 +deterministic.                                                
+      145 +- *Equivalent rewrites:*                                      
+      146 +  - Cosmetic: case changes, reformatting, a comment or trailin
+          +g semicolon, `!=`.                                            
+      147 +  - Structural: alias renaming, reordered conjuncts and join-e
+          +quality sides, inner joins                                    
+      148 +    rewritten as implicit comma joins, `COUNT(1)`, and `ORDER 
+          +BY 1` added when the target has                               
+      149 +    no ordering.                                              
+      150 +- *Breaking mutations:*                                       
+      151 +  - Flip a comparison against a literal, change a literal, dro
+          +p a literal filter.                                           
+      152 +  - Swap or drop output columns.                              
+      153 +  - Drop `DISTINCT`, swap `SUM`↔`AVG` or `MIN`↔`MAX`, change `
+          +LEFT` to `INNER` join.                                        
+      154 +  - Flip `IS [NOT] NULL`, turn `100.0` into `100` (integer div
+          +ision), flip or drop                                          
+      155 +    `ORDER BY`, change `LIMIT`.                               
+      156 +  - Remove quotes from a quoted camelCase name, or add quotes 
+          +to an unquoted PascalCase one.                                
+      157 +    Both produce an invalid query.                            
+      158 +                                                              
+      159 +Each query gets at most one cosmetic positive and at most one 
+          +column-shape or quoting negative,                             
+      160 +so the automatic pairs are mostly structural and semantic chan
+          +ges.                                                          
+      161 +                                                              
+      162 +**Malformed predictions** rotate through `null`, `""`, a fence
+          +d markdown block, two statements,                             
+      163 +prose, truncated SQL, MySQL backticks, a `DELETE`, and a missp
+          +elled `SELECT`. Under the spec's                              
+      164 +rule that a prediction must be exactly one valid PostgreSQL qu
+          +ery, all of these are labeled                                 
+      165 +not equivalent.                                               
+      166 +                                                              
+      167 +```bash                                                       
+      168 +python -m generator.build_pairs     # after build_queries     
+      169 +```                                                           
+      170 +                                                              
+      171 +The build refuses to write the file if any of these fail:     
+      172 +- Every prediction labeled equivalent parses and resolves agai
+          +nst the schema.                                               
+      173 +- Hand-written negatives are valid SQL unless the note marks t
+          +hem `INVALID:`, and those must                                
+      174 +  actually fail.                                              
+      175 +- Cosmetic rewrites leave the PostgreSQL parse tree unchanged.
+      176 +- Breaking mutations change the parse tree.                   
+      177 +- No pair is duplicated.                                      
+      178 +                                                              
+      179 +A harness that always answers "not equivalent" scores 56.9% on
+          + this set.                                                    
+      180 +                                                              
+      181  ## How scoring works
+      182  _TODO_
+      183  
+
+⏺ I've written dataset/pairs.jsonl in the format from the brief: 1,509 labeled
+  pairs, 651 equivalent and 858 not. Every query in queries.jsonl has its own
+  set. A rebuild produces a byte-identical file, and ./score reads all of them.
+  With the placeholder scorer it gets 56.9%, which is just the share of
+  non-equivalent pairs.
+
+  Each query gets pairs from three sources:
+
+  ┌──────────────┬────────────┬─────┬────────────────────────────────────────┐
+  │    source    │ equivalent │ not │               what it is               │
+  ├──────────────┼────────────┼─────┼────────────────────────────────────────┤
+  │ hand-written │ 180        │ 293 │ About 3 per query, each with a         │
+  │              │            │     │ one-line note explaining the label     │
+  ├──────────────┼────────────┼─────┼────────────────────────────────────────┤
+  │              │            │     │ Rewrites and mutations generated from  │
+  │ automatic    │ 471        │ 408 │ the target query, in                   │
+  │              │            │     │ generator/mutations.py                 │
+  ├──────────────┼────────────┼─────┼────────────────────────────────────────┤
+  │              │            │     │ One per query: null, "", markdown      │
+  │ malformed    │ 0          │ 157 │ fences, two statements, prose,         │
+  │              │            │     │ truncated SQL, MySQL backticks, a      │
+  │              │            │     │ DELETE, a misspelled SELEC             │
+  └──────────────┴────────────┴─────┴────────────────────────────────────────┘
+
+  What the pairs test. The hand-written pairs focus on cases where comparing the
+  SQL text or structure would give the wrong answer:
+  - Matches that look different, for example:
+    - NOT IN against a column that can't be NULL.
+    - A LEFT JOIN that behaves like an INNER JOIN because of a required foreign
+      key.
+    - <> 'No' on a two-value enum.
+    - A redundant IS NOT NULL filter.
+  - Near-misses, for example:
+    - NOT IN against a nullable ManagerId.
+    - COUNT(*) after a LEFT JOIN.
+    - Integer division.
+    - A filter in WHERE that turns a LEFT JOIN into an inner one.
+    - DISTINCT merging different rows that share a name.
+    - NULLs sorting first under DESC ... LIMIT.
+
+  How the labels are protected. generator/build_pairs.py refuses to write the
+  file if any check fails:
+  - Every prediction labeled equivalent must parse with Postgres's parser and
+    match the schema, so a typo can't be labeled a match.
+  - Hand-written negatives must be valid SQL unless marked INVALID:, and the
+    marked ones must actually fail.
+  - Purely cosmetic rewrites must leave Postgres's parse tree unchanged.
+  - Mutations labeled not equivalent must actually change the query.
+
+  On my first sample of automatic negatives, column swaps and drops made up too
+  much of the set. Now each query gets at most one cosmetic positive and at most
+  one column-shape or quoting negative. Shorter queries still fall back to
+  those when they have few semantic mutations, so they're about a third of the
+  automatic negatives.
+
+  Decisions for you to check. I made four judgment calls about what "equivalent"
+  means:
+  - CHECK constraints are not relied on. The brief defines equivalence using
+    column types, primary keys, NOT NULL and foreign keys, and doesn't mention
+    CHECK constraints. So no pair is labeled equivalent only because a flag
+    column can only hold 0/1.
+  - Enum types are relied on. Enums are part of a column's type, so "IsRemote"
+    <> 'No' is labeled equivalent to = 'Yes'.
+  - Unlinked columns count as independent. For example, quarter = 4 vs month IN
+    (10, 11, 12), or IsoCode = 'DE' vs Name = 'Germany'. These are labeled not
+    equivalent because no constraint ties the columns together. That's strict,
+    but it's what the brief's wording implies. They're a handful of pairs, each
+    with a note saying why.
+  - Extra fields. Each pair also carries query_id, source, category and note.
+    The harness ignores them, but you can strip them if you want the exact five
+    fields from the brief.
+
+  The README now explains how the pairs are built. No Postgres was available to
+  run the queries, so all labels come from reasoning plus these static checks;
+  none have been checked against a live database. Nothing is committed yet.
+
+❯ <ide_opened_file>The user opened the file
+  /Users/kartikuppalapati/Documents/Projects/SQL-Checker/sqleval/cli.py in the
+  IDE. This may or may not be related to the current task.</ide_opened_file>
+
+❯ Okay now lets focus on the scoring harness. The match criteria consists of
+  A predicted query matches when it is equivalent to the ground truth: on every
+  database that satisfies the
+  schema (column types, primary keys, NOT NULL and foreign keys), it returns
+  the same result. Concretely:
+  Same number of columns, in the same order. Column names and aliases don’t
+  matter.
+  Same rows, counting duplicates.
+  Row order matters only when the ground truth’s outermost query has an ORDER
+  BY.
+  PostgreSQL semantics apply: identifier case folding and quoting, NULL
+  handling, types, and integer
+  division.
+  A prediction that is not exactly one valid PostgreSQL query doesn’t match.
+
+⏺ I'll start by checking how sqlglot's qualify step handles the constructs the
+  equivalence checker relies on. The design depends on which normalizations
+  sqlglot already does, such as resolving ORDER BY 1 and output aliases,
+  expanding *, and handling USING.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ I've laid out a design that uses sqlglot's qualify for normalization and
+  pglast for Postgres-accurate parsing/validation, then compares queries via a
+  fast identity check or a canonical rewrite (alias renaming, join/condition
+  normalization, EXISTS unification, key-based reductions) with partial credit
+  for mismatches.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ I found that sqlglot strips quotes from enum type names on columns, so the
+  loader needs to try both exact and lowercase name matches. I'll update the
+  schema catalog to record enum labels per column, then write the validator and
+  canonicalizer.
+
+⏺ Bash(.venv/bin/python - <<'EOF'
+      import pathlib…)
+  ⎿  Updated sqleval/schema.py (+12 -2)
+      34      name: str
+      35      type: str
+      36      not_null: bool = False
+      37 +    enum_labels: list[str] | None = None  # set when the column
+         +'s type is an ENUM                                             
+      38  
+      39  
+      40  @dataclass
+     ...
+      67      return [norm_ident(i) for i in node.find_all(exp.Identifier
+          )]
+      68  
+      69  
+      69 -def _type_str(kind: exp.DataType | None, enums: dict[str, list[
+         -str]]) -> str:                                                 
+      70 +def _type_str(kind: exp.DataType | None) -> str:               
+      71      if kind is None:
+      72          return "TEXT"
+      73      if kind.this == exp.DataType.Type.USERDEFINED:
+     ...
+      75      return kind.sql(dialect="postgres")
+      76  
+      77  
+      78 +def _enum_labels(kind: exp.DataType | None, enums: dict[str, li
+         +st[str]]) -> list[str] | None:                                 
+      79 +    if kind is None or kind.this != exp.DataType.Type.USERDEFIN
+         +ED:                                                            
+      80 +        return None                                            
+      81 +    name = str(kind.args.get("kind") or "").split(".")[-1].stri
+         +p('"')                                                         
+      82 +    # sqlglot drops the quotes from the type name: try the exac
+         +t spelling, then the folded one                                
+      83 +    return enums.get(name) or enums.get(name.lower())          
+      84 +                                                               
+      85 +                                                               
+      86  def load_catalog(ddl: str) -> Catalog:
+      87      cat = Catalog()
+      88      for stmt in sqlglot.parse(ddl, read="postgres"):
+     ...
+      100          table = Table(tbl_name)
+      101          for item in stmt.this.expressions:
+      102              if isinstance(item, exp.ColumnDef):
+       94 -                col = Column(norm_ident(item.this), _type_str(
+          -item.args.get("kind"), cat.enums))                            
+      103 +                kind = item.args.get("kind")                  
+      104 +                col = Column(norm_ident(item.this), _type_str(
+          +kind), enum_labels=_enum_labels(kind, cat.enums))             
+      105                  for c in item.constraints:
+      106                      kind = c.kind
+      107                      if isinstance(kind, exp.NotNullColumnConst
+           raint) and not kind.args.get("allow_null"):
+  ⎿  Interrupted · What should Claude do instead?
+
+❯ continue
+
+⏺ Enum labels are now stored per column, so a lowercase 'active' against
+  "EmploymentStatus" can be detected as invalid. Next I'll write the validity
+  gate around Postgres's parser.
+
+⏺ Write(sqleval/validate.py)
+  ⎿  Wrote 39 lines to sqleval/validate.py
+      1 """Syntax gate using PostgreSQL's own parser (libpg_query via pgl
+        ast). No execution, no network."""
+      2 import json
+      3
+      4 from pglast.parser import parse_sql_json
+      6
+      7 class Invalid(Exception):
+      8     """The prediction is not exactly one valid PostgreSQL query."
+        ""
+      9
+     … +35 lines (ctrl+o to expand)
+
+⏺ Next is the main piece, the canonicalizer. Each rewrite runs as a separate
+  pass, and its docstring states the condition that keeps it sound.
+
+⏺ Write(sqleval/canonical.py)
+  ⎿  Wrote 1148 lines to sqleval/canonical.py
+       1 """Rewrite a PostgreSQL query into a canonical form so that equi
+       2
+       3 Every rewrite here must preserve the query's result on *every* d
+       4 schema (types, primary keys, NOT NULL, foreign keys). When a rew
+       5 proven from the schema, the rewrite is skipped -- a missed equiv
+         alence costs a false negative,
+       7
+       8 Pipeline (see canonicalize()):
+         stgreSQL case folding)
+         iases, positional derived columns)
+     … +1358 lines (ctrl+o to expand)
+
+⏺ I'll clean up two leftover lines in the canonicalizer (a dead if False branch
+  and a no-op condition), then write compare() to run checks in order: validity,
+  fast path, canonical comparison, partial score.
+⏺ Bash(.venv/bin/python - <<'EOF'
+      import pathlib…)
+  ⎿  Updated sqleval/canonical.py (+2 -4)
+      21  import sqlglot
+      22  from sqlglot import exp
+      23  from sqlglot.errors import OptimizeError
+      24 +from sqlglot.optimizer.normalize_identifiers import normalize_i
+         +dentifiers                                                     
+      25  from sqlglot.optimizer.qualify import qualify
+      26  from sqlglot.schema import MappingSchema
+      27  
+     ...
+      241              return qualify(tree, dialect="postgres", validate_
+           qualify_columns=False, quote_identifiers=True)
+      242          except Exception as e:
+      243              raise Unsupported(f"qualify: {e}")
+      243 -    tree = qualify(tree, dialect="postgres", quote_identifiers
+          -=True, validate_qualify_columns=False) \                      
+      244 -        if False else tree                                    
+      245 -    from sqlglot.optimizer.normalize_identifiers import normal
+          -ize_identifiers                                               
+      244      tree = normalize_identifiers(tree, dialect="postgres")
+      245      _check_tables(tree, ctx)
+      246      try:
+     ...
+      841  def _count_col_to_star(sel, R):
+      842      nonnull = _scope_nonnull(sel)
+      843      for cnt in list(sel.find_all(exp.Count)):
+      846 -        if _owner_select(cnt) is not sel or isinstance(cnt.par
+          -ent, exp.Filter) and False:                                   
+      844 +        if _owner_select(cnt) is not sel:                     
+      845              continue
+      846          arg = cnt.this
+      847          if isinstance(arg, exp.Column) and R.not_null(arg, non
+           null):
+
+⏺ Write(sqleval/equivalence.py)
+  ⎿  Added 92 lines, removed 4 lines
+       1  """Decide whether a predicted query is equivalent to the ground
+           truth."""
+       2 +import re                                                      
+       3  from dataclasses import dataclass
+       4 +from functools import lru_cache                                
+       5  
+       6 +from . import canonical                                        
+       7 +from .canonical import Context, Unsupported                    
+       8 +from .schema import load_catalog                               
+       9 +from .validate import Invalid, parse_tree                      
+      10  
+      11 +                                                               
+      12  @dataclass
+      13  class Verdict:
+      14      match: bool
+     ...
+       16      reason: str = ""
+       17  
+       18  
+       19 +_CONTEXTS: dict[str, Context] = {}                            
+       20 +                                                              
+       21 +                                                              
+       22 +def context_for(schema_ddl: str | None) -> Context:           
+       23 +    key = schema_ddl or ""                                    
+       24 +    if key not in _CONTEXTS:                                  
+       25 +        _CONTEXTS[key] = Context(load_catalog(schema_ddl) if s
+          +chema_ddl else None)                                          
+       26 +    return _CONTEXTS[key]                                     
+       27 +                                                              
+       28 +                                                              
+       29 +@lru_cache(maxsize=4096)                                      
+       30 +def _analyze_gt(gt: str, schema_ddl: str | None):             
+       31 +    """Ground truth analysis is shared by every pair with the 
+          +same target."""                                               
+       32 +    ctx = context_for(schema_ddl)                             
+       33 +    try:                                                      
+       34 +        ast = parse_tree(gt)                                  
+       35 +    except Invalid:                                           
+       36 +        return None, None, None                               
+       37 +    try:                                                      
+       38 +        tree = canonical.prepare(gt, ctx)                     
+       39 +        ordered = canonical.has_outer_order(tree)             
+       40 +        return ast, canonical.canonicalize_tree(tree, ctx, ord
+          +ered), ordered                                                
+       41 +    except (Invalid, Unsupported, RecursionError):            
+       42 +        return ast, None, None                                
+       43 +    except Exception:                                         
+       44 +        return ast, None, None                                
+       45 +                                                              
+       46 +                                                              
+       47  def compare(ground_truth: str, predicted: str, schema_ddl: str
+            | None) -> Verdict:
+       13 -    # TODO: parse both queries, normalize, and compare.       
+       14 -    if predicted.strip() == ground_truth.strip():             
+       15 -        return Verdict(True, 1.0, "exact")                    
+       16 -    return Verdict(False, 0.0, "not_implemented")             
+       48 +    # 1. the prediction must be exactly one PostgreSQL query  
+       49 +    try:                                                      
+       50 +        pred_ast = parse_tree(predicted)                      
+       51 +    except Invalid as e:                                      
+       52 +        return Verdict(False, 0.0, f"invalid:{e}")            
+       53 +                                                              
+       54 +    gt_ast, gt_canon, gt_ordered = _analyze_gt(ground_truth, s
+          +chema_ddl)                                                    
+       55 +    if gt_ast is None:                                        
+       56 +        return Verdict(False, 0.0, "ground_truth_unparseable")
+       57 +                                                              
+       58 +    # 2. identical PostgreSQL parse trees (formatting, keyword
+          + case, unquoted identifier case)                              
+       59 +    if pred_ast == gt_ast:                                    
+       60 +        return Verdict(True, 1.0, "identical_parse_tree")     
+       61 +                                                              
+       62 +    # 3. canonical forms                                      
+       63 +    ctx = context_for(schema_ddl)                             
+       64 +    try:                                                      
+       65 +        tree = canonical.prepare(predicted, ctx)              
+       66 +    except Invalid as e:                                      
+       67 +        return Verdict(False, 0.0, f"invalid:{e}")            
+       68 +    except Unsupported:                                       
+       69 +        return Verdict(False, _text_similarity(ground_truth, p
+          +redicted), "unsupported")                                     
+       70 +    if gt_canon is None:                                      
+       71 +        return Verdict(False, _text_similarity(ground_truth, p
+          +redicted), "ground_truth_unsupported")                        
+       72 +    try:                                                      
+       73 +        pred_canon = canonical.canonicalize_tree(tree, ctx, gt
+          +_ordered)                                                     
+       74 +    except Invalid as e:                                      
+       75 +        return Verdict(False, 0.0, f"invalid:{e}")            
+       76 +    except Exception:                                         
+       77 +        return Verdict(False, _text_similarity(ground_truth, p
+          +redicted), "unsupported")                                     
+       78 +                                                              
+       79 +    if pred_canon == gt_canon:                                
+       80 +        return Verdict(True, 1.0, "canonical_match")          
+       81 +    return Verdict(False, _canon_similarity(gt_canon, pred_can
+          +on), "not_equivalent")                                        
+       82 +                                                              
+       83 +                                                              
+       84 +# ------------------------------------------------------------
+          +----------------- partial credit                              
+       85 +                                                              
+       86 +_TOK = re.compile(r"[A-Za-z_#'][\w#.'%-]*")                   
+       87 +                                                              
+       88 +                                                              
+       89 +def _tokens(s: str) -> set[str]:                              
+       90 +    return set(_TOK.findall(s))                               
+       91 +                                                              
+       92 +                                                              
+       93 +def _jaccard(a: set, b: set) -> float:                        
+       94 +    return len(a & b) / len(a | b) if a | b else 0.0          
+       95 +                                                              
+       96 +                                                              
+       97 +def _canon_similarity(gt: str, pred: str) -> float:           
+       98 +    """Partial credit for a valid but non-equivalent predictio
+          +n: overlap of canonical tokens                                
+       99 +    (tables, columns, operators, literals), capped below 1.0."
+          +""                                                            
+      100 +    return round(0.95 * _jaccard(_tokens(gt), _tokens(pred)), 
+          +4)                                                            
+      101 +                                                              
+      102 +                                                              
+      103 +def _text_similarity(gt: str, pred: str) -> float:            
+      104 +    return round(0.5 * _jaccard(_tokens(gt.lower()), _tokens(p
+          +red.lower())), 4)                                             
+
+⏺ Write(sqleval/eval_dev.py)
+  ⎿  Wrote 42 lines to sqleval/eval_dev.py
+      1 """Developer tool: list the harness's mistakes on a labeled pairs
+         file.
+      2
+      3 python -m sqleval.eval_dev --schemas dataset/schemas --pairs data
+        set/pairs.jsonl [--show fp|fn|all] [--limit N]
+      5 import argparse
+      6 import json
+      7 from pathlib import Path
+      8
+      9 from .cli import load_schemas, score_pair
+     … +38 lines (ctrl+o to expand)
+
+⏺ Bash(printf 'sqlglot==25.34.1\npglast==8.6\n' > requirements.txt && time
+      .venv/bin/python ./score --schemas dataset/schemas --pairs
+      dataset/pairs.jsonl --output /pri…)
+  ⎿  Updated requirements.txt (+1 -0)
+      1  sqlglot==25.34.1
+      2 +pglast==8.6                                                     
+
+⏺ The first full run scored 93.3% accuracy on 1,509 labels in 1.7 seconds. I'll
+  start by examining the false positives, since those risk unsound rewrites,
+  then move on to the false negatives.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Zero false positives. Now the false negatives:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ COUNT(1) isn't being folded into COUNT(*). I suspect sqlglot stores an extra
+  attribute on COUNT(*) that my rewrite doesn't copy over, so I'll compare the
+  two parse trees directly.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Found the cause: sqlglot flags both as big_int=True, but my rewritten COUNT(*)
+  drops that flag. I'll fix it by modifying the argument in place rather than
+  constructing a new node, then address the remaining hand-written misses.
+
+⏺ Bash(.venv/bin/python - <<'EOF'
+      import pathlib…)
+  ⎿  Updated sqleval/canonical.py (+2 -1)
+      471              return exp.Coalesce(this=then, expressions=[defaul
+           t])
+      472      # --- COUNT(<non-null literal>) is COUNT(*) --------------
+           ------------------------------
+      473      if isinstance(node, exp.Count) and isinstance(node.this, e
+           xp.Literal):
+      474 -        return exp.Count(this=exp.Star())                     
+      474 +        node.set("this", exp.Star())                          
+      475 +        return node                                           
+      476      # --- case-insensitive matching --------------------------
+           -----------------------------
+      477      if isinstance(node, exp.RegexpILike):
+      478          pat = _lit_str(node.expression)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ 74 hand-written equivalences are still missed, split into two bugs with NOT
+  IN/NULL filtering, several recurring missing rewrite patterns, some one-off
+  cases, and EXCEPT forms. I'll tackle the bug first.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Found the bug: rewrite ordering causes the inner IS NOT NULL check to run
+  before the NOT IN rewrite makes it redundant, so I'll fix it by running the
+  per-query rewrites a second pass. I'll also add eight recurring rewrites
+  (e.g., correlated aggregate subqueries to LEFT JOIN+GROUP BY, LEFT to INNER
+  JOIN under HAVING count conditions, EXISTS-to-join, FK existence checks to
+  null checks, etc.), each gated by the soundness precondition that justifies
+  it.
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Update(sqleval/canonical.py)
+  ⎿  Added 408 lines, removed 1 line
+       630  
+       631  def _scope_rewrites(sel: exp.Select, R: Resolver, ctx: Contex
+            t):
+       632      _right_to_left(sel)
+       633 +    _scalar_eq_to_join(sel, R, ctx)                          
+       634      _scalar_subqueries_to_joins(sel, R, ctx)
+       635 +    _decorrelate_aggregate(sel, R, ctx)                      
+       636      R.refresh(sel.root())
+       637      _promote_fk_left_joins(sel, R, ctx)
+       638      _in_to_exists(sel, R)
+       639      _left_join_anti_to_not_exists(sel, R, ctx)
+       640      R.refresh(sel.root())
+       641 +    _fk_exists_to_null_test(sel, R, ctx)                     
+       642 +    _pull_up_exists(sel, R, ctx)                             
+       643 +    R.refresh(sel.root())                                    
+       644 +    _eliminate_fk_joins(sel, R, ctx)                         
+       645 +    R.refresh(sel.root())                                    
+       646 +    _left_join_count_having_to_inner(sel, R, ctx)            
+       647      _drop_redundant_not_null(sel, R)
+       640 -    _count_col_to_star(sel, R)                               
+       648 +    _count_col_to_star(sel, R, ctx)                          
+       649 +    _equivalence_classes(sel, R)                             
+       650      _reduce_group_by(sel, R, ctx)
+       651      _drop_redundant_distinct(sel, R, ctx)
+       652  
+       653  
+       654 +def _refs_only(e, aliases):                                  
+       655 +    return all(c.table in aliases for c in _col_refs(e))     
+       656 +                                                             
+       657 +                                                             
+       658 +def _base_single_source(s, R):                               
+       659 +    """(alias, table) if SELECT s reads a single base table w
+           +ith no joins."""                                             
+       660 +    if not isinstance(s, exp.Select) or s.args.get("joins") o
+           +r not s.args.get("from"):                                    
+       661 +        return None                                          
+       662 +    src = s.args["from"].this                                
+       663 +    if not isinstance(src, exp.Table):                       
+       664 +        return None                                          
+       665 +    t = R.base_table(src.alias_or_name)                      
+       666 +    return (src.alias_or_name, t) if t else None             
+       667 +                                                             
+       668 +                                                             
+       669 +def _key_covered(eq_cols, tname, ctx):                       
+       670 +    return any(set(k) <= set(eq_cols) for k in ctx.keys(tname
+           +))                                                           
+       671 +                                                             
+       672 +                                                             
+       673 +def _scalar_eq_to_join(sel, R, ctx):                         
+       674 +    """a = (SELECT x.c FROM t x WHERE <key of t> = <literals>
+           +)  ->  JOIN t x WHERE x.c = a AND ...                        
+       675 +    The subquery yields at most one row; no row makes the com
+           +parison NULL (row dropped), exactly                          
+       676 +    like the join finding no partner."""                     
+       677 +    where = sel.args.get("where")                            
+       678 +    if not where:                                            
+       679 +        return                                               
+       680 +    out, changed = [], False                                 
+       681 +    for c in _conjuncts(where.this):                         
+       682 +        if isinstance(c, exp.EQ):                            
+       683 +            for a, q in ((c.this, c.expression), (c.expressio
+           +n, c.this)):                                                 
+       684 +                if not isinstance(q, exp.Subquery):          
+       685 +                    continue                                 
+       686 +                s = q.this                                   
+       687 +                one = _base_single_source(s, R)              
+       688 +                if not one or not _is_simple_select(s) or s.a
+           +rgs.get("distinct") or len(s.expressions) != 1:              
+       689 +                    continue                                 
+       690 +                x, tname = one                               
+       691 +                val = _unalias(s.expressions[0])             
+       692 +                conds = _conjuncts(s.args["where"].this) if s
+           +.args.get("where") else []                                   
+       693 +                if not isinstance(val, exp.Column) or not _re
+           +fs_only(s, {x}):                                             
+       694 +                    continue                                 
+       695 +                eq_cols = []                                 
+       696 +                for cc in conds:                             
+       697 +                    if isinstance(cc, exp.EQ):               
+       698 +                        cols = [z for z in (cc.this, cc.expre
+           +ssion) if isinstance(z, exp.Column)]                         
+       699 +                        lits = [z for z in (cc.this, cc.expre
+           +ssion) if isinstance(z, (exp.Literal, exp.Cast))]            
+       700 +                        if len(cols) == 1 and len(lits) == 1:
+       701 +                            eq_cols.append(cols[0].name)     
+       702 +                if not _key_covered(eq_cols, tname, ctx):    
+       703 +                    continue                                 
+       704 +                sel.append("joins", exp.Join(this=s.args["fro
+           +m"].this.copy()))                                            
+       705 +                out.extend([cc.copy() for cc in conds] + [exp
+           +.EQ(this=val.copy(), expression=a.copy())])                  
+       706 +                changed = True                               
+       707 +                break                                        
+       708 +            else:                                            
+       709 +                out.append(c)                                
+       710 +            continue                                         
+       711 +        out.append(c)                                        
+       712 +    if changed:                                              
+       713 +        _where_set(sel, out)                                 
+       714 +                                                             
+       715 +                                                             
+       716 +def _decorrelate_aggregate(sel, R, ctx):                     
+       717 +    """One correlated aggregate subquery  (SELECT AGG(..) FRO
+           +M t x WHERE <conds>)  in a plain,                            
+       718 +    non-aggregating SELECT over base tables with primary keys
+           + equals                                                      
+       719 +    LEFT JOIN t x ON <conds> ... GROUP BY <primary keys of th
+           +e outer tables> with AGG(..)                                 
+       720 +    (COUNT(*) counts x's primary key, so the NULL-extended ro
+           +w counts 0)."""                                              
+       721 +    if sel.args.get("group") or sel.args.get("having") or sel
+           +.args.get("distinct") or sel.args.get("with"):               
+       722 +        return                                               
+       723 +    if any(_owner_select(a) is sel for a in sel.find_all(exp.
+           +AggFunc)) or sel.find(exp.Window):                           
+       724 +        return                                               
+       725 +    srcs = _sources(sel)                                     
+       726 +    if not srcs or any(not isinstance(n, exp.Table) or not R.
+           +base_table(a) for a, n, _ in srcs):                          
+       727 +        return                                               
+       728 +    outer_aliases = {a for a, _, _ in srcs}                  
+       729 +    pks = []                                                 
+       730 +    for a, n, _ in srcs:                                     
+       731 +        t = ctx.table(R.base_table(a))                       
+       732 +        if not t.primary_key:                                
+       733 +            return                                           
+       734 +        pks += [exp.column(k, table=a, quoted=True) for k in 
+           +t.primary_key]                                               
+       735 +    cands = {}                                               
+       736 +    for q in sel.find_all(exp.Subquery):                     
+       737 +        if _owner_select(q) is not sel or isinstance(q.parent
+           +, (exp.From, exp.Join)):                                     
+       738 +            continue                                         
+       739 +        s = q.this                                           
+       740 +        one = _base_single_source(s, R)                      
+       741 +        if not one or len(s.expressions) != 1:               
+       742 +            continue                                         
+       743 +        if s.args.get("group") or s.args.get("having") or s.a
+           +rgs.get("limit") or s.args.get("distinct"):                  
+       744 +            continue                                         
+       745 +        agg = _unalias(s.expressions[0])                     
+       746 +        if not isinstance(agg, (exp.Count, exp.Sum, exp.Avg, 
+           +exp.Min, exp.Max)):                                          
+       747 +            continue                                         
+       748 +        x, tname = one                                       
+       749 +        if not _refs_only(s, outer_aliases | {x}) or not ctx.
+           +table(tname).primary_key:                                    
+       750 +            continue                                         
+       751 +        if any(isinstance(n, exp.Subquery) for n in s.find_al
+           +l(exp.Subquery)):                                            
+       752 +            continue                                         
+       753 +        cands.setdefault(q.sql(), (q, s, agg, x, tname))     
+       754 +    if len(cands) != 1:                                      
+       755 +        return                                               
+       756 +    _, (q, s, agg, x, tname) = next(iter(cands.items()))     
+       757 +    key = q.sql()                                            
+       758 +    new_agg = agg.copy()                                     
+       759 +    if isinstance(new_agg, exp.Count) and isinstance(new_agg.
+           +this, exp.Star):                                             
+       760 +        new_agg.set("this", exp.column(ctx.table(tname).prima
+           +ry_key[0], table=x, quoted=True))                            
+       761 +    conds = _conjuncts(s.args["where"].this) if s.args.get("w
+           +here") else []                                               
+       762 +    sel.append("joins", exp.Join(this=s.args["from"].this.cop
+           +y(), on=_and_all([c.copy() for c in conds]),                 
+       763 +                                 side="LEFT"))               
+       764 +                                                             
+       765 +    def swap(n):                                             
+       766 +        return new_agg.copy() if isinstance(n, exp.Subquery) 
+           +and n.sql() == key else n                                    
+       767 +    sel.set("expressions", [p.transform(swap) for p in sel.ex
+           +pressions])                                                  
+       768 +    if sel.args.get("order"):                                
+       769 +        sel.set("order", sel.args["order"].transform(swap))  
+       770 +    if sel.args.get("where"):                                
+       771 +        keep, having = [], []                                
+       772 +        for c in _conjuncts(sel.args["where"].this):         
+       773 +            if any(isinstance(n, exp.Subquery) and n.sql() ==
+           + key for n in c.walk()):                                     
+       774 +                having.append(c.transform(swap))             
+       775 +            else:                                            
+       776 +                keep.append(c)                               
+       777 +        _where_set(sel, keep)                                
+       778 +        if having:                                           
+       779 +            sel.set("having", exp.Having(this=_and_all(having
+           +)))                                                          
+       780 +    sel.set("group", exp.Group(expressions=pks))             
+       781 +                                                             
+       782 +                                                             
+       783 +def _left_join_count_having_to_inner(sel, R, ctx):           
+       784 +    """With one group per outer row (GROUP BY covers the othe
+           +r tables' primary keys), a HAVING                            
+       785 +    COUNT(b.c) > k (k >= 0) discards exactly the NULL-extende
+           +d groups of LEFT JOIN b."""                                  
+       786 +    group, having = sel.args.get("group"), sel.args.get("havi
+           +ng")                                                         
+       787 +    if not group or not having:                              
+       788 +        return                                               
+       789 +    gkeys = {g.sql() for g in group.expressions}             
+       790 +    for j in sel.args.get("joins") or []:                    
+       791 +        if (j.args.get("side") or "").upper() != "LEFT" or no
+           +t isinstance(j.this, exp.Table):                             
+       792 +            continue                                         
+       793 +        b = j.this.alias_or_name                             
+       794 +        btab = R.base_table(b)                               
+       795 +        if not btab:                                         
+       796 +            continue                                         
+       797 +        others = [(a, n) for a, n, _ in _sources(sel) if a !=
+           + b]                                                          
+       798 +        ok = True                                            
+       799 +        for a, n in others:                                  
+       800 +            t = R.base_table(a)                              
+       801 +            if not t or not ctx.table(t).primary_key or R.nul
+           +lable_side(a):                                               
+       802 +                ok = False                                   
+       803 +                break                                        
+       804 +            if not all(exp.column(k, table=a, quoted=True).sq
+           +l() in gkeys for k in ctx.table(t).primary_key):             
+       805 +                ok = False                                   
+       806 +                break                                        
+       807 +        if not ok:                                           
+       808 +            continue                                         
+       809 +        on_ids = set(map(id, _col_refs(j.args.get("on") or ex
+           +p.true())))                                                  
+       810 +        bad = False                                          
+       811 +        for c in sel.find_all(exp.Column):                   
+       812 +            if c.table == b and id(c) not in on_ids and not a
+           +ny(isinstance(p, exp.AggFunc) for p in _ancestors(c, sel)):  
+       813 +                bad = True                                   
+       814 +                break                                        
+       815 +        if bad:                                              
+       816 +            continue                                         
+       817 +        for c in _conjuncts(having.this):                    
+       818 +            cnt, k = None, None                              
+       819 +            if isinstance(c, exp.LT) and isinstance(c.express
+           +ion, exp.Count):                                             
+       820 +                cnt, k = c.expression, _lit_int(c.this)      
+       821 +                k = k if k is not None and k >= 0 else None  
+       822 +            elif isinstance(c, exp.LTE) and isinstance(c.expr
+           +ession, exp.Count):                                          
+       823 +                cnt, k = c.expression, _lit_int(c.this)      
+       824 +                k = k if k is not None and k >= 1 else None  
+       825 +            if cnt is None or k is None or not isinstance(cnt
+           +.this, exp.Column) or cnt.this.table != b:                   
+       826 +                continue                                     
+       827 +            col = ctx.table(btab).columns.get(cnt.this.name) 
+       828 +            if col and col.not_null:                         
+       829 +                j.set("side", None)                          
+       830 +                return                                       
+       831 +                                                             
+       832 +                                                             
+       833 +def _ancestors(node, stop):                                  
+       834 +    p = node.parent                                          
+       835 +    while p is not None and p is not stop:                   
+       836 +        yield p                                              
+       837 +        p = p.parent                                         
+       838 +                                                             
+       839 +                                                             
+       840 +def _fk_exists_to_null_test(sel, R, ctx):                    
+       841 +    """EXISTS (SELECT 1 FROM p x WHERE x.k = a.f), with FK a.
+           +f -> p(k), is just a.f IS NOT NULL."""                       
+       842 +    where = sel.args.get("where")                            
+       843 +    if not where:                                            
+       844 +        return                                               
+       845 +    out, changed = [], False                                 
+       846 +    for c in _conjuncts(where.this):                         
+       847 +        neg = isinstance(c, exp.Not) and isinstance(c.this, e
+           +xp.Exists)                                                   
+       848 +        ex = c.this if neg else c                            
+       849 +        if isinstance(ex, exp.Exists):                       
+       850 +            s = ex.this                                      
+       851 +            one = _base_single_source(s, R)                  
+       852 +            conds = _conjuncts(s.args["where"].this) if one a
+           +nd s.args.get("where") else []                               
+       853 +            if one and _is_simple_select(s) and len(conds) ==
+           + 1 and isinstance(conds[0], exp.EQ):                         
+       854 +                x, ptab = one                                
+       855 +                l, r = conds[0].this, conds[0].expression    
+       856 +                if isinstance(r, exp.Column) and r.table == x
+           +:                                                            
+       857 +                    l, r = r, l                              
+       858 +                if isinstance(l, exp.Column) and l.table == x
+           + and isinstance(r, exp.Column) and r.table != x:             
+       859 +                    atab = R.base_table(r.table)             
+       860 +                    if atab and any(fk.ref_table == ptab and 
+           +fk.columns == [r.name] and fk.ref_columns == [l.name]        
+       861 +                                    for fk in ctx.table(atab)
+           +.foreign_keys):                                              
+       862 +                        test = exp.Is(this=r.copy(), expressi
+           +on=exp.Null())                                               
+       863 +                        out.append(test if neg else exp.Not(t
+           +his=test))                                                   
+       864 +                        changed = True                       
+       865 +                        continue                             
+       866 +        out.append(c)                                        
+       867 +    if changed:                                              
+       868 +        _where_set(sel, out)                                 
+       869 +                                                             
+       870 +                                                             
+       871 +def _pull_up_exists(sel, R, ctx):                            
+       872 +    """EXISTS (SELECT ... FROM s WHERE p) as a WHERE conjunct
+           + equals an inner join with s when                            
+       873 +    (a) the outer SELECT is DISTINCT and does not aggregate (
+           +duplicates vanish anyway), or                                
+       874 +    (b) the subquery reads one table and its correlation fixe
+           +s a key (at most one partner row)."""                        
+       875 +    where = sel.args.get("where")                            
+       876 +    if not where:                                            
+       877 +        return                                               
+       878 +    distinct = sel.args.get("distinct") and not sel.args["dis
+           +tinct"].args.get("on")                                       
+       879 +    aggregating = sel.args.get("group") or any(_owner_select(
+           +a) is sel for a in sel.find_all(exp.AggFunc)) \              
+       880 +        or sel.find(exp.Window)                              
+       881 +    outer_aliases = {a for a, _, _ in _sources(sel)}         
+       882 +    out, added = [], []                                      
+       883 +    for c in _conjuncts(where.this):                         
+       884 +        if isinstance(c, exp.Exists) and isinstance(c.this, e
+           +xp.Select):                                                  
+       885 +            s = c.this                                       
+       886 +            if _is_simple_select(s) and not s.args.get("disti
+           +nct") and not any(                                           
+       887 +                    (j.args.get("side") or "") for j in s.arg
+           +s.get("joins") or []) \                                      
+       888 +                    and all(isinstance(n, exp.Table) for _, n
+           +, _ in _sources(s)):                                         
+       889 +                inner_conds = _conjuncts(s.args["where"].this
+           +) if s.args.get("where") else []                             
+       890 +                for j in s.args.get("joins") or []:          
+       891 +                    inner_conds += _conjuncts(j.args.get("on"
+           +))                                                           
+       892 +                ok = bool(distinct and not aggregating)      
+       893 +                if not ok:                                   
+       894 +                    one = _base_single_source(s, R)          
+       895 +                    if one:                                  
+       896 +                        x, tname = one                       
+       897 +                        eq_cols = []                         
+       898 +                        for cc in inner_conds:               
+       899 +                            if isinstance(cc, exp.EQ):       
+       900 +                                for a2, b2 in ((cc.this, cc.e
+           +xpression), (cc.expression, cc.this)):                       
+       901 +                                    if isinstance(a2, exp.Col
+           +umn) and a2.table == x and not any(                          
+       902 +                                            r.table == x for 
+           +r in _col_refs(b2)) and (                                    
+       903 +                                            _col_refs(b2) or 
+           +isinstance(b2, (exp.Literal, exp.Cast))):                    
+       904 +                                        eq_cols.append(a2.nam
+           +e)                                                           
+       905 +                        ok = _key_covered(eq_cols, tname, ctx
+           +) and any(                                                   
+       906 +                            r.table in outer_aliases for cc i
+           +n inner_conds for r in _col_refs(cc))                        
+       907 +                if ok:                                       
+       908 +                    for _, n, _ in _sources(s):              
+       909 +                        added.append(exp.Join(this=n.copy()))
+       910 +                    out.extend(cc.copy() for cc in inner_cond
+           +s)                                                           
+       911 +                    continue                                 
+       912 +        out.append(c)                                        
+       913 +    if added:                                                
+       914 +        sel.set("joins", (sel.args.get("joins") or []) + adde
+           +d)                                                           
+       915 +        _where_set(sel, out)                                 
+       916 +                                                             
+       917 +                                                             
+       918 +def _eliminate_fk_joins(sel, R, ctx):                        
+       919 +    """A join to parent p x ON x.k = a.f (FK a.f -> p(k), k a
+           + key) whose only use of x is x.k adds                        
+       920 +    nothing: replace x.k by a.f and drop the join (an inner j
+           +oin also requires a.f IS NOT NULL)."""                       
+       921 +    srcs = _sources(sel)                                     
+       922 +    if len(srcs) < 2:                                        
+       923 +        return                                               
+       924 +    has_outer = any((j.args.get("side") or "") for _, _, j in
+           + srcs if j is not None)                                      
+       925 +    inner_conds = _conjuncts(sel.args["where"].this) if sel.a
+           +rgs.get("where") else []                                     
+       926 +    for _, _, j in srcs:                                     
+       927 +        if j is not None and not j.args.get("side"):         
+       928 +            inner_conds += _conjuncts(j.args.get("on"))      
+       929 +    for x, node, j in srcs:                                  
+       930 +        ptab = R.base_table(x)                               
+       931 +        if not ptab or not isinstance(node, exp.Table):      
+       932 +            continue                                         
+       933 +        side = (j.args.get("side") or "").upper() if j is not
+           + None else ""                                                
+       934 +        if side not in ("", "LEFT"):                         
+       935 +            continue                                         
+       936 +        if side == "LEFT":                                   
+       937 +            pool = _conjuncts(j.args.get("on"))              
+       938 +        else:                                                
+       939 +            if has_outer and j is None:                      
+       940 +                continue                                     
+       941 +            pool = inner_conds                               
+       942 +        mine = [c for c in pool if any(r.table == x for r in 
+           +_col_refs(c))]                                               
+       943 +        if len(mine) != 1 or not isinstance(mine[0], exp.EQ):
+       944 +            continue                                         
+       945 +        l, r = mine[0].this, mine[0].expression              
+       946 +        if isinstance(r, exp.Column) and r.table == x:       
+       947 +            l, r = r, l                                      
+       948 +        if not (isinstance(l, exp.Column) and l.table == x an
+           +d isinstance(r, exp.Column) and r.table != x):               
+       949 +            continue                                         
+       950 +        atab = R.base_table(r.table)                         
+       951 +        if not atab or R.nullable_side(r.table):             
+       952 +            continue                                         
+       953 +        if not any(fk.ref_table == ptab and fk.columns == [r.
+           +name] and fk.ref_columns == [l.name]                         
+       954 +                   for fk in ctx.table(atab).foreign_keys):  
+       955 +            continue                                         
+       956 +        if [l.name] not in ctx.keys(ptab):                   
+       957 +            continue                                         
+       958 +        pcol, acol = ctx.table(ptab).columns.get(l.name), ctx
+           +.table(atab).columns.get(r.name)                             
+       959 +        if not pcol or not acol or pcol.type != acol.type:   
+       960 +            continue                                         
+       961 +        cond_ids = set(map(id, mine[0].find_all(exp.Column)))
+       962 +        refs = [c for c in sel.find_all(exp.Column) if c.tabl
+           +e == x and id(c) not in cond_ids]                            
+       963 +        if any(c.name != l.name for c in refs):              
+       964 +            continue                                         
+       965 +        for c in refs:                                       
+       966 +            c.replace(r.copy())                              
+       967 +        # remove x and its condition                         
+       968 +        if side == "LEFT":                                   
+       969 +            joins = [jj for jj in sel.args["joins"] if jj is 
+           +not j]                                                       
+       970 +            sel.set("joins", joins or None)                  
+       971 +        else:                                                
+       972 +            if j is None:                                    
+       973 +                joins = list(sel.args.get("joins") or [])    
+       974 +                first = joins.pop(0)                         
+       975 +                sel.args["from"].set("this", first.this.copy(
+           +))                                                           
+       976 +                rest_conds = _conjuncts(first.args.get("on"))
+       977 +                sel.set("joins", joins or None)              
+       978 +            else:                                            
+       979 +                joins = [jj for jj in sel.args["joins"] if jj
+           + is not j]                                                   
+       980 +                rest_conds = []                              
+       981 +                sel.set("joins", joins or None)              
+       982 +            # gather every inner condition into WHERE, minus 
+           +the eliminated one                                           
+       983 +            conds = []                                       
+       984 +            for jj in sel.args.get("joins") or []:           
+       985 +                if not jj.args.get("side") and jj.args.get("o
+           +n") is not None:                                             
+       986 +                    conds += _conjuncts(jj.args["on"])       
+       987 +                    jj.set("on", None)                       
+       988 +            conds += rest_conds + (_conjuncts(sel.args["where
+           +"].this) if sel.args.get("where") else [])                   
+       989 +            conds += [] if j is None else [c for c in _conjun
+           +cts(j.args.get("on")) if c is not mine[0]]                   
+       990 +            conds = [c for c in conds if c is not mine[0] and
+           + c.sql() != mine[0].sql()]                                   
+       991 +            if not R.not_null(r, _scope_nonnull(sel)):       
+       992 +                conds.append(exp.Not(this=exp.Is(this=r.copy(
+           +), expression=exp.Null())))                                  
+       993 +            _where_set(sel, conds)                           
+       994 +        R.refresh(sel.root())                                
+       995 +        return _eliminate_fk_joins(sel, R, ctx)              
+       996 +                                                             
+       997 +                                                             
+       998 +def _equivalence_classes(sel, R):                            
+       999 +    """Inner-join equalities a.x = b.y make the two columns i
+           +nterchangeable in the SELECT list,                           
+      1000 +    GROUP BY, HAVING and ORDER BY. Each class is rewritten to
+           + one representative, chosen by                               
+      1001 +    (table, column) so the choice does not depend on alias na
+           +mes."""                                                      
+      1002 +    conds = _conjuncts(sel.args["where"].this) if sel.args.ge
+           +t("where") else []                                           
+      1003 +    for j in sel.args.get("joins") or []:                    
+      1004 +        if not j.args.get("side"):                           
+      1005 +            conds += _conjuncts(j.args.get("on"))            
+      1006 +    local = {a for a, _, _ in _sources(sel)}                 
+      1007 +    parent = {}                                              
+      1008 +                                                             
+      1009 +    def find(k):                                             
+      1010 +        while parent[k] != k:                                
+      1011 +            parent[k] = parent[parent[k]]                    
+      1012 +            k = parent[k]                                    
+      1013 +        return k                                             
+      1014 +    cols = {}                                                
+      1015 +    for c in conds:                                          
+      1016 +        if isinstance(c, exp.EQ) and isinstance(c.this, exp.C
+           +olumn) and isinstance(c.expression, exp.Column):             
+      1017 +            a, b = c.this, c.expression                      
+      1018 +            if a.table not in local or b.table not in local o
+           +r R.nullable_side(a.table) or R.nullable_side(b.table):      
+      1019 +                continue                                     
+      1020 +            ca, cb = R.column(a), R.column(b)                
+      1021 +            if not ca or not cb or ca.type != cb.type:       
+      1022 +                continue                                     
+      1023 +            for z in (a, b):                                 
+      1024 +                cols[z.sql()] = z                            
+      1025 +                parent.setdefault(z.sql(), z.sql())          
+      1026 +            parent[find(a.sql())] = find(b.sql())            
+      1027 +    if not parent:                                           
+      1028 +        return                                               
+      1029 +    classes = {}                                             
+      1030 +    for k in parent:                                         
+      1031 +        classes.setdefault(find(k), []).append(k)            
+      1032 +    rep = {}                                                 
+      1033 +    for members in classes.values():                         
+      1034 +        keyed = sorted(((R.base_table(cols[m].table), cols[m]
+           +.name), m) for m in members)                                 
+      1035 +        if len(keyed) > 1 and keyed[0][0] == keyed[1][0]:    
+      1036 +            continue  # tie between two aliases of the same t
+           +able/column: no canonical choice                             
+      1037 +        for m in members:                                    
+      1038 +            rep[m] = cols[keyed[0][1]]                       
+      1039 +    if not rep:                                              
+      1040 +        return                                               
+      1041 +                                                             
+      1042 +    def tf(n):                                               
+      1043 +        if isinstance(n, exp.Column) and n.sql() in rep and _
+           +owner_select(n) is sel:                                      
+      1044 +            return rep[n.sql()].copy()                       
+      1045 +        return n                                             
+      1046 +    sel.set("expressions", [p.transform(tf) for p in sel.expr
+           +essions])                                                    
+      1047 +    for k in ("group", "having", "order"):                   
+      1048 +        if sel.args.get(k):                                  
+      1049 +            sel.set(k, sel.args[k].transform(tf))            
+      1050 +                                                             
+      1051 +                                                             
+      1052  def _right_to_left(sel):
+      1053      joins = sel.args.get("joins") or []
+      1054      if len(joins) == 1 and (joins[0].args.get("side") or "").
+            upper() == "RIGHT":
+
+⏺ Update(sqleval/canonical.py)
+  ⎿  Added 10 lines, removed 2 lines
+      1246      _where_set(sel, keep)
+      1247  
+      1248  
+      1249 -def _count_col_to_star(sel, R):                              
+      1249 +def _count_col_to_star(sel, R, ctx):                         
+      1250 +    """COUNT(col) of a never-NULL column is COUNT(*). On the 
+           +NULL side of an outer join,                                  
+      1251 +    COUNT(b.<any NOT NULL column>) counts matched rows: norma
+           +lize it to b's first key column."""                          
+      1252      nonnull = _scope_nonnull(sel)
+      1253      for cnt in list(sel.find_all(exp.Count)):
+      1254          if _owner_select(cnt) is not sel:
+      1255              continue
+      1256          arg = cnt.this
+      1255 -        if isinstance(arg, exp.Column) and R.not_null(arg, no
+           -nnull):                                                      
+      1257 +        if not isinstance(arg, exp.Column):                  
+      1258 +            continue                                         
+      1259 +        if R.not_null(arg, nonnull):                         
+      1260              cnt.set("this", exp.Star())
+      1261 +            continue                                         
+      1262 +        col, tname = R.column(arg), R.base_table(arg.table)  
+      1263 +        if col and col.not_null and tname and R.nullable_side
+           +(arg.table) and ctx.table(tname).primary_key:                
+      1264 +            cnt.set("this", exp.column(ctx.table(tname).prima
+           +ry_key[0], table=arg.table, quoted=True))                    
+      1265  
+      1266  
+      1267  def _alias_columns(exprs):
+
+⏺ Update(sqleval/canonical.py)
+  ⎿  Added 5 lines, removed 4 lines
+      1553      if ctx.catalog is not None:
+      1554          R = Resolver(ctx, tree)
+      1555          tree = tree.transform(lambda n: _norm_expr(n, R))
+      1556 -        R.refresh(tree)                                      
+      1557 -        for sel in reversed([s for s in tree.walk(bfs=False) 
+           -if isinstance(s, exp.Select)]):                              
+      1558 -            _scope_rewrites(sel, R, ctx)                     
+      1559 -        tree = tree.transform(lambda n: _norm_expr(n, R))    
+      1556 +        for _ in range(2):  # rewrites in outer scopes can en
+           +able rewrites in inner ones                                  
+      1557 +            R.refresh(tree)                                  
+      1558 +            for sel in reversed([s for s in tree.walk(bfs=Fal
+           +se) if isinstance(s, exp.Select)]):                          
+      1559 +                _scope_rewrites(sel, R, ctx)                 
+      1560 +            tree = tree.transform(lambda n: _norm_expr(n, R))
+      1561      _clean_exists(tree)
+      1562      _strip_orders(tree, keep_outer_order)
+      1563      return serialize(tree)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Accuracy is up from 93.3% to 96.9%, still with no false positives. Here's what
+  remains:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ I expect campus_018, web_018, snowflake_015, and social_006/social_018 to
+  already match under the new rewrites—let me compare the canonical forms of
+  ground truth versus prediction side by side to confirm.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ I found three bugs: equal-column replacement never runs because transform()
+  detaches nodes from their parent query, FK join removal is too strict about
+  which conditions can mention the parent table, and equality chains aren't
+  normalized across different orderings. I'll fix each by transforming in place,
+  loosening the FK join check, and grouping column equalities into equivalence
+  classes in the serializer.
+
+⏺ Bash(.venv/bin/python - <<'EOF'
+      import pathlib…)
+  ⎿  Updated sqleval/canonical.py (+12 -9)
+      939              if has_outer and j is None:
+      940                  continue
+      941              pool = inner_conds
+      942 -        mine = [c for c in pool if any(r.table == x for r in _
+          -col_refs(c))]                                                 
+      943 -        if len(mine) != 1 or not isinstance(mine[0], exp.EQ): 
+      944 -            continue                                          
+      945 -        l, r = mine[0].this, mine[0].expression               
+      946 -        if isinstance(r, exp.Column) and r.table == x:        
+      947 -            l, r = r, l                                       
+      948 -        if not (isinstance(l, exp.Column) and l.table == x and
+          - isinstance(r, exp.Column) and r.table != x):                 
+      942 +        mine = None                                           
+      943 +        for c in pool:                                        
+      944 +            if isinstance(c, exp.EQ) and isinstance(c.this, ex
+          +p.Column) and isinstance(c.expression, exp.Column):           
+      945 +                l, r = c.this, c.expression                   
+      946 +                if r.table == x:                              
+      947 +                    l, r = r, l                               
+      948 +                if l.table == x and r.table != x:             
+      949 +                    mine = [c]                                
+      950 +                    break                                     
+      951 +        if mine is None:                                      
+      952              continue
+      953          atab = R.base_table(r.table)
+      954          if not atab or R.nullable_side(r.table):
+     ...
+      1046          if isinstance(n, exp.Column) and n.sql() in rep and _
+            owner_select(n) is sel:
+      1047              return rep[n.sql()].copy()
+      1048          return n
+      1046 -    sel.set("expressions", [p.transform(tf) for p in sel.expr
+           -essions])                                                    
+      1049 +    sel.set("expressions", [p.transform(tf, copy=False) for p
+           + in sel.expressions])                                        
+      1050      for k in ("group", "having", "order"):
+      1051          if sel.args.get(k):
+      1049 -            sel.set(k, sel.args[k].transform(tf))            
+      1052 +            sel.set(k, sel.args[k].transform(tf, copy=False))
+      1053  
+      1054  
+      1055  def _right_to_left(sel):
+
+⏺ Now the equality classes in the serializer:
+
+⏺ Update(sqleval/canonical.py)
+  ⎿  Added 1 line
+      1479              outer.append(f"{side or 'INNER'}JOIN({self(j.this
+            )} ON {self(on)})")
+      1480          if n.args.get("where"):
+      1481              conds += _conjuncts(n.args["where"].this)
+      1482 +        conds_ser = self._eq_classes(conds)                  
+      1483          parts = [
+      1484              "with=" + self(n.args.get("with")) if n.args.get(
+            "with") else "",
+      1485              "distinct=" + self(n.args.get("distinct")) if n.a
+            rgs.get("distinct") else "",
+
+⏺ Update(sqleval/canonical.py)  ⎿  Added 1 line, removed 1 line
+      1486              "sel=" + "[" + ",".join(self(e) for e in n.expres
+            sions) + "]",
+      1487              "from={" + ",".join(sorted(rels)) + "}",
+      1488              "outer=[" + ",".join(outer) + "]" if outer else "
+            ",
+      1489 -            "where={" + ",".join(sorted(set(self(c) for c in 
+           -conds))) + "}" if conds else "",                             
+      1489 +            "where={" + ",".join(conds_ser) + "}" if conds_se
+           +r else "",                                                   
+      1490              "group=" + self(n.args["group"]) if n.args.get("g
+            roup") else "",
+      1491              "having=" + self(n.args["having"].this) if n.args
+            .get("having") else "",
+      1492              "order=" + self(n.args["order"].expressions) if n
+            .args.get("order") else "",
+
+⏺ Update(sqleval/canonical.py)
+  ⎿  Added 24 lines
+      1459      def _Group(self, n):
+      1460          return "GROUP{" + ",".join(sorted(set(self(e) for e i
+            n n.expressions))) + "}"
+      1461  
+      1462 +    def _eq_classes(self, conds):                            
+      1463 +        """Column = column conjuncts are rendered as equivale
+           +nce classes, so a=b AND b=c and                              
+      1464 +        a=b AND a=c (the same constraint) serialize identical
+           +ly."""                                                       
+      1465 +        parent, rest = {}, []                                
+      1466 +                                                             
+      1467 +        def find(k):                                         
+      1468 +            while parent[k] != k:                            
+      1469 +                parent[k] = parent[parent[k]]                
+      1470 +                k = parent[k]                                
+      1471 +            return k                                         
+      1472 +        for c in conds:                                      
+      1473 +            if isinstance(c, exp.EQ) and isinstance(c.this, e
+           +xp.Column) and isinstance(c.expression, exp.Column):         
+      1474 +                a, b = self(c.this), self(c.expression)      
+      1475 +                parent.setdefault(a, a)                      
+      1476 +                parent.setdefault(b, b)                      
+      1477 +                parent[find(a)] = find(b)                    
+      1478 +            else:                                            
+      1479 +                rest.append(self(c))                         
+      1480 +        classes = {}                                         
+      1481 +        for k in parent:                                     
+      1482 +            classes.setdefault(find(k), []).append(k)        
+      1483 +        rest += ["EQC{" + ",".join(sorted(m)) + "}" for m in 
+           +classes.values()]                                            
+      1484 +        return sorted(set(rest))                             
+      1485 +                                                             
+      1486      def _Select(self, n):
+      1487          rels, conds, outer = [], [], []
+      1488          frm = n.args.get("from")
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Accuracy didn't move, so I'll check whether the four target pairs actually
+  changed:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The serialized forms match now, confirming the earlier score was stale, but I
+  spotted an ordering bug: column replacement happens before key-based GROUP BY
+  reduction, which breaks key recognition. I'll fix the order so key reduction
+  runs first, then rerun.
+
+⏺ Bash(.venv/bin/python - <<'EOF'
+      import pathlib…)
+  ⎿  Updated sqleval/canonical.py (+1 -1)
+      646      _left_join_count_having_to_inner(sel, R, ctx)
+      647      _drop_redundant_not_null(sel, R)
+      648      _count_col_to_star(sel, R, ctx)
+      649 -    _equivalence_classes(sel, R)                              
+      649      _reduce_group_by(sel, R, ctx)
+      650      _drop_redundant_distinct(sel, R, ctx)
+      651 +    _equivalence_classes(sel, R)                              
+      652  
+      653  
+      654  def _refs_only(e, aliases):
+
+⏺ Accuracy holds at 97.2% with no false positives. Now I'll add four more sound
+  rewrites: multi-table EXISTS-to-join conversion, equal-column substitution in
+  WHERE clauses, removing redundant IS NOT NULL checks before NULL-ignoring
+  aggregates, and converting EXCEPT on a unique key to NOT EXISTS with self-join
+  elimination.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ 97.5%, with no false positives (grep exits with status 1 when it finds
+  nothing). The condition I wrote for the self-join removal is convoluted, so
+  I'll simplify it before looking at what's left.
+
+⏺ Bash(.venv/bin/python - <<'EOF'
+      import pathlib…)
+  ⎿  Updated sqleval/canonical.py (+3 -5)
+      1435          for b, a in ((c.this, c.expression), (c.expression, c
+            .this)):
+      1436              if b.table in local and a.table not in local and 
+            b.name == a.name:
+      1437                  bt, at = R.base_table(b.table), R.base_table(
+            a.table)
+      1438 -                if bt and bt == at and [b.name] in ctx.keys(b
+           -t) and not R.nullable_side(a.table) \                        
+      1439 -                        and not R.nullable_side(b.table) and 
+           -len(local) > 1 or (                                          
+      1440 -                        bt and bt == at and [b.name] in ctx.k
+           -eys(bt) and len(local) == 1):                                
+      1441 -                    if len(local) == 1:                      
+      1442 -                        continue  # keep a FROM item; nothing
+           - to substitute it with                                       
+      1438 +                # with a single FROM item there would be noth
+           +ing left to read from: skip                                  
+      1439 +                if bt and bt == at and [b.name] in ctx.keys(b
+           +t) and len(local) > 1 \                                      
+      1440 +                        and not R.nullable_side(a.table) and 
+           +not R.nullable_side(b.table):                                
+      1441                      old, new = b.table, a.table
+      1442                      srcs = _sources(sel)
+      1443                      rest = [(al, n, j) for al, n, j in srcs i
+            f al != old]
+
+⏺ Auditing my rewrites for soundness turned up three real bugs: FK join removal
+  breaks on LEFT JOINs with extra ON conditions, BETWEEN SYMMETRIC can't be
+  expanded, and GROUP BY key reduction can mask invalid queries under Postgres's
+  grouping rules. I'll fix the first two by restricting those rewrites, and add
+  Postgres's grouping and SELECT DISTINCT/ORDER BY rules to the validity check
+  for the third.
+
+⏺ Bash(.venv/bin/python - <<'EOF'
+      import pathlib…)
+  ⎿  Updated sqleval/canonical.py (+43 -1)
+      253          raise Unsupported(f"qualify: {msg}")
+      254      except Exception as e:
+      255          raise Unsupported(f"qualify: {e}")
+      256 +    _check_grouping(tree, ctx)                                
+      257      return tree
+      258  
+      259  
+      260 +def _check_grouping(tree, ctx):                               
+      261 +    """PostgreSQL rejects a grouped (or aggregating) SELECT th
+          +at uses a column outside an aggregate                         
+      262 +    unless it is grouped or its table's PRIMARY KEY is grouped
+          + (UNIQUE keys do not count). It also                          
+      263 +    rejects SELECT DISTINCT ... ORDER BY <expression not in th
+          +e select list>."""                                            
+      264 +    for sel in tree.find_all(exp.Select):                     
+      265 +        group = sel.args.get("group")                         
+      266 +        own_aggs = [a for a in sel.find_all(exp.AggFunc)      
+      267 +                    if _owner_select(a) is sel and not any(isi
+          +nstance(x, exp.Window) for x in _ancestors(a, sel))]          
+      268 +        aliases = {p.alias for p in sel.expressions if isinsta
+          +nce(p, exp.Alias)}                                            
+      269 +        if sel.args.get("distinct") and not sel.args["distinct
+          +"].args.get("on") and sel.args.get("order"):                  
+      270 +            proj = {_unalias(p).sql() for p in sel.expressions
+          +}                                                             
+      271 +            for o in sel.args["order"].expressions:           
+      272 +                t = o.this                                    
+      273 +                if t.sql() not in proj and not (isinstance(t, 
+          +exp.Column) and not t.table and t.name in aliases):           
+      274 +                    raise Invalid("distinct_order_by")        
+      275 +        if not group and not own_aggs:                        
+      276 +            continue                                          
+      277 +        gset = {g.sql() for g in (group.expressions if group e
+          +lse [])}                                                      
+      278 +        pk_grouped = set()                                    
+      279 +        for alias, node, _ in _sources(sel):                  
+      280 +            if isinstance(node, exp.Table) and ctx.table(node.
+          +name) and ctx.table(node.name).primary_key and all(           
+      281 +                    exp.column(k, table=alias, quoted=True).sq
+          +l() in gset for k in ctx.table(node.name).primary_key):       
+      282 +                pk_grouped.add(alias)                         
+      283 +                                                              
+      284 +        def ok(e):                                            
+      285 +            if e.sql() in gset or isinstance(e, (exp.AggFunc, 
+          +exp.Subquery, exp.Literal, exp.Star)):                        
+      286 +                return True                                   
+      287 +            if isinstance(e, exp.Window):                     
+      288 +                return all(ok(c) for c in e.iter_expressions()
+          + if not isinstance(c, exp.AggFunc)) or True                   
+      289 +            if isinstance(e, exp.Column):                     
+      290 +                if not e.table:                               
+      291 +                    return e.name in aliases                  
+      292 +                return e.table in pk_grouped or e.table not in
+          + {a for a, _, _ in _sources(sel)}                             
+     … 25 more lines (ctrl+o to expand)
+
+⏺ My new checks produce correct results in all 6 cases, but I noticed the
+  "invalid" label is misleading for BETWEEN SYMMETRIC—sqlglot misparses it as an
+  unresolved column even though Postgres accepts the query. I'll fix this by
+  cross-checking against Postgres's actual parsed columns and reporting
+  "unsupported" instead when they all resolve correctly.
+
+⏺ Bash(.venv/bin/python - <<'EOF'
+      import pathlib…)
+  ⎿  Updated sqleval/canonical.py (+31 -0)
+      222  
+      223  # ============================================================
+           =================== stage 1: parse
+      224  
+      225 +def _pg_columns_exist(sql, ctx) -> bool:                      
+      226 +    """Every column name PostgreSQL's parser sees exists in so
+          +me table or is an output alias."""                            
+      227 +    import json                                               
+      228 +    from pglast.parser import parse_sql_json                  
+      229 +    try:                                                      
+      230 +        data = json.loads(parse_sql_json(sql))                
+      231 +    except Exception:                                         
+      232 +        return False                                          
+      233 +    names, aliases = set(), set()                             
+      234 +                                                              
+      235 +    def walk(o):                                              
+      236 +        if isinstance(o, dict):                               
+      237 +            if "ColumnRef" in o:                              
+      238 +                fields = o["ColumnRef"].get("fields", [])     
+      239 +                if fields and "String" in fields[-1]:         
+      240 +                    names.add(fields[-1]["String"]["sval"])   
+      241 +            if "ResTarget" in o and o["ResTarget"].get("name")
+          +:                                                             
+      242 +                aliases.add(o["ResTarget"]["name"])           
+      243 +            for v in o.values():                              
+      244 +                walk(v)                                       
+      245 +        elif isinstance(o, list):                             
+      246 +            for v in o:                                       
+      247 +                walk(v)                                       
+      248 +    walk(data)                                                
+      249 +    known = {c for t in ctx.catalog.tables.values() for c in t
+          +.columns} | aliases                                           
+      250 +    return names <= known                                     
+      251 +                                                              
+      252 +                                                              
+      253  def _check_tables(tree, ctx):
+      254      ctes = {c.alias_or_name for c in tree.find_all(exp.CTE)}
+      255      for t in tree.find_all(exp.Table):
+     ...
+      277      except OptimizeError as e:
+      278          msg = str(e)
+      279          if "could not be resolved" in msg or "Unknown" in msg 
+           or "Ambiguous" in msg or "ambiguous" in msg:
+      280 +            if _pg_columns_exist(sql, ctx):                   
+      281 +                # PostgreSQL's parser sees only real columns: 
+          +sqlglot mis-parsed the query                                  
+      282 +                raise Unsupported(f"qualify: {msg}")          
+     … 3 more lines (ctrl+o to expand)
+
+⏺ Accuracy dropped by 3 pairs. Two ground-truth queries are now "unsupported",
+  which means the grouping check is rejecting valid targets. I'll find out
+  which.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Found the issue: sqlglot treats FILTER (WHERE …) as a separate wrapper, so its
+  columns appear ungrouped even though they belong to an aggregate. I'll fix
+  the check to treat FILTER as part of the aggregate, remove the redundant
+  window-function branch, and lean toward accepting whenever unsure, since the
+  check must never be stricter than Postgres itself.
+
+⏺ Bash(.venv/bin/python - <<'EOF'
+      import pathlib…)
+  ⎿  Updated sqleval/canonical.py (+3 -3)
+      313                  pk_grouped.add(alias)
+      314  
+      315          def ok(e):
+      316 -            if e.sql() in gset or isinstance(e, (exp.AggFunc, 
+          -exp.Subquery, exp.Literal, exp.Star)):                        
+      316 +            # lenient where unsure: never reject what PostgreS
+          +QL would accept                                               
+      317 +            if e.sql() in gset or isinstance(e, (exp.AggFunc, 
+          +exp.Filter, exp.Window, exp.Subquery,                         
+      318 +                                                 exp.Literal, 
+          +exp.Star)):                                                   
+      319                  return True
+      318 -            if isinstance(e, exp.Window):                     
+      319 -                return all(ok(c) for c in e.iter_expressions()
+          - if not isinstance(c, exp.AggFunc)) or True                   
+      320              if isinstance(e, exp.Column):
+      321                  if not e.table:
+      322                      return e.name in aliases
+
+⏺ Accuracy is back to 97.5% with no false positives, but since the test pairs
+  are mine, this doesn't guarantee the graders' own datasets will behave the
+  same. I'll stress-test by applying every breaking mutation to every target
+  query, not just the sampled 3 per query, to see if the harness ever misfires a
+  match.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The stress test passes fully: all 586 breaking mutations across 157 targets
+  are rejected and all 1,448 equivalence-preserving rewrites are recognized.
+  Next, I'll write unit tests pinning down each rewrite rule's preconditions,
+  pairing a case where it holds (match expected) with a near-identical case
+  where it fails (no match expected).
+
+⏺ Write(tests/test_equivalence.py)
+  ⎿  Wrote 195 lines to tests/test_equivalence.py
+      1 """Boundary tests for each canonicalization rule: one pair where
+        the rule's precondition holds
+      2 (must match) next to a near-identical pair where it does not (mus
+        t not match).
+      3
+      5 """
+      6 import unittest
+      7 from pathlib import Path
+      8
+      9 from sqleval.equivalence import compare
+     … +306 lines (ctrl+o to expand)
+
+⏺ Bash(rm -f tests/.gitkeep && .venv/bin/python -m unittest discover -s tests
+      2>&1 | grep -v "unsupported syntax" | grep -E
+      "FAIL|Error|reason=|GT:|PR:|Ran|OK|FAILED"…)
+  ⎿  Deleted tests/.gitkeep (+0 -0)
+
+⏺ The test revealed a real bug: the DISTINCT-removal logic mistakenly counts
+  aggregates inside correlated subqueries as belonging to the outer query, which
+  incorrectly strips DISTINCT and enables bad decorrelation. I'll fix the check
+  to only count aggregates that belong to the query itself.
+
+⏺ Bash(.venv/bin/python - <<'EOF'
+      import pathlib…)
+  ⎿  Updated sqleval/canonical.py (+3 -2)
+      1455                 for g in group.expressions):
+      1456              sel.set("distinct", None)
+      1457          return
+      1458 -    if any(p.find(exp.AggFunc) for p in projs) and not any(p.
+           -find(exp.Window) for p in projs):                            
+      1459 -        sel.set("distinct", None)  # a single aggregate row  
+      1458 +    own_aggs = [a for a in sel.find_all(exp.AggFunc) if _owne
+           +r_select(a) is sel]                                          
+      1459 +    if own_aggs and not any(p.find(exp.Window) for p in projs
+           +):                                                           
+      1460 +        sel.set("distinct", None)  # an aggregate without GRO
+           +UP BY returns a single row                                   
+      1461          return
+      1462      srcs = _sources(sel)
+      1463      if srcs and all(isinstance(n, exp.Table) and alias_determ
+            ined(a) for a, n, _ in srcs):
+
+⏺ All checks pass again. I found a similar flaw in the HAVING COUNT → INNER JOIN
+  rule, which wrongly matched aggregates inside correlated subqueries—I'll fix
+  it and add tests for these edge cases.
+
+⏺ Bash(.venv/bin/python - <<'EOF'
+      import pathlib…)
+  ⎿  Updated sqleval/canonical.py (+2 -1)
+      881          on_ids = set(map(id, _col_refs(j.args.get("on") or exp
+           .true())))
+      882          bad = False
+      883          for c in sel.find_all(exp.Column):
+      884 -            if c.table == b and id(c) not in on_ids and not an
+          -y(isinstance(p, exp.AggFunc) for p in _ancestors(c, sel)):    
+      884 +            if c.table == b and id(c) not in on_ids and not an
+          +y(                                                            
+      885 +                    isinstance(p, exp.AggFunc) and _owner_sele
+          +ct(p) is sel for p in _ancestors(c, sel)):                    
+      886                  bad = True
+      887                  break
+      888          if bad:
+  ⎿  Updated tests/test_equivalence.py (+20 -0)
+      168       "SELECT id FROM instructors EXCEPT SELECT id FROM student
+           s", False, "EXCEPT is not"),
+      169      (CAMPUS, "SELECT id FROM students UNION SELECT id FROM ins
+           tructors",
+      170       "SELECT id FROM students UNION ALL SELECT id FROM instruc
+           tors", False, "UNION vs UNION ALL"),
+      171 +    # --- adversarial: rules must not fire on look-alikes ----
+          +--------------------------------------------                  
+      172 +    (CAMPUS, "SELECT COUNT(*) OVER () FROM students", "SELECT 
+          +DISTINCT COUNT(*) OVER () FROM students", False,              
+      173 +     "DISTINCT over a window function is not a single aggregat
+          +e row"),                                                      
+      174 +    (CAMPUS, "SELECT s.name FROM students s WHERE NOT EXISTS (
+          +SELECT 1 FROM departments d WHERE d.id = s.department_id)",   
+      175 +     "SELECT s.name FROM students s WHERE s.department_id NOT 
+          +IN (SELECT id FROM departments)", False,                      
+      176 +     "NOT IN with a nullable outer column"),                  
+      177 +    (CAMPUS, "SELECT s.name FROM students s WHERE s.department
+          +_id IS NULL",                                                 
+      178 +     "SELECT s.name FROM students s WHERE NOT EXISTS (SELECT 1
+          + FROM departments d WHERE d.id = s.department_id)",           
+      179 +     True, "NOT EXISTS parent row via FK is FK IS NULL"),     
+      180 +    (CAMPUS, "SELECT s.name FROM students s WHERE s.department
+          +_id IS NULL",                                                 
+      181 +     "SELECT s.name FROM students s WHERE NOT EXISTS (SELECT 1
+          + FROM departments d WHERE d.id = s.department_id AND d.budget 
+          +> 0)",                                                        
+      182 +     False, "extra condition breaks the FK shortcut"),        
+      183 +    (CAMPUS, "SELECT c.name FROM courses c JOIN course_instruc
+          +tors ci ON ci.course_id = c.id GROUP BY c.id, c.name HAVING CO
+          +UNT(*) > 1",                                                  
+      184 +     "SELECT c.name FROM courses c LEFT JOIN course_instructor
+          +s ci ON ci.course_id = c.id GROUP BY c.id, c.name HAVING COUNT
+          +(ci.instructor_id) > 1 OR c.credits > 3",                     
+      185 +     False, "HAVING disjunction keeps NULL-extended groups"), 
+      186 +    (CAMPUS, "SELECT id FROM students WHERE id IN (SELECT stud
+          +ent_id FROM enrollments) OR is_active = 1",                   
+      187 +     "SELECT id FROM students WHERE EXISTS (SELECT 1 FROM enro
+          +llments e WHERE e.student_id = students.id) OR is_active = 1",
+      188 +     False, "IN inside OR is left alone (no match claimed)"), 
+      189 +    (CAMPUS, "SELECT name FROM students WHERE enrollment_year 
+          += 2020",                                                      
+      190 +     "SELECT name FROM students WHERE enrollment_year = 2020.0
+          +", False, "numeric literal is not an integer literal"),       
+      191      (SOCIAL, '''SELECT u."userName" FROM "users" u WHERE u."pr
+           ivateProfile" = 'on\'''',
+      192       '''SELECT u."userName" FROM "users" u WHERE u."privatePro
+           file" = 'ON\'''', False, "case-sensitive literal"),
+      193  ]
+
+⏺ I noticed two of the new tests assert false non-equivalences—both pairs are
+  actually equivalent given the NOT NULL constraint and numeric comparison
+  behavior. I'll swap them out for pairs that are genuinely non-equivalent.
+
+⏺ Bash(.venv/bin/python - <<'EOF'
+      import pathlib…)  ⎿  Updated tests/test_equivalence.py (+5 -5)
+      183      (CAMPUS, "SELECT c.name FROM courses c JOIN course_instruc
+           tors ci ON ci.course_id = c.id GROUP BY c.id, c.name HAVING CO
+           UNT(*) > 1",
+      184       "SELECT c.name FROM courses c LEFT JOIN course_instructor
+           s ci ON ci.course_id = c.id GROUP BY c.id, c.name HAVING COUNT
+           (ci.instructor_id) > 1 OR c.credits > 3",
+      185       False, "HAVING disjunction keeps NULL-extended groups"),
+      186 -    (CAMPUS, "SELECT id FROM students WHERE id IN (SELECT stud
+          -ent_id FROM enrollments) OR is_active = 1",                   
+      187 -     "SELECT id FROM students WHERE EXISTS (SELECT 1 FROM enro
+          -llments e WHERE e.student_id = students.id) OR is_active = 1",
+      188 -     False, "IN inside OR is left alone (no match claimed)"), 
+      189 -    (CAMPUS, "SELECT name FROM students WHERE enrollment_year 
+          -= 2020",                                                      
+      190 -     "SELECT name FROM students WHERE enrollment_year = 2020.0
+          -", False, "numeric literal is not an integer literal"),       
+      186 +    (CAMPUS, "SELECT id FROM students s WHERE NOT EXISTS (SELE
+          +CT 1 FROM departments d WHERE d.id = s.department_id) OR is_ac
+          +tive = 1",                                                    
+      187 +     "SELECT id FROM students WHERE department_id NOT IN (SELE
+          +CT id FROM departments) OR is_active = 1",                    
+      188 +     False, "NOT IN inside OR with a nullable column"),       
+      189 +    (CAMPUS, "SELECT enrollment_year / 2 FROM students", "SELE
+          +CT enrollment_year / 2.0 FROM students", False,               
+      190 +     "integer vs numeric division"),                          
+      191      (SOCIAL, '''SELECT u."userName" FROM "users" u WHERE u."pr
+           ivateProfile" = 'on\'''',
+      192       '''SELECT u."userName" FROM "users" u WHERE u."privatePro
+           file" = 'ON\'''', False, "case-sensitive literal"),
+      193  ]
+
+⏺ Tests pass, so now I'll check performance against the target of 10,000 pairs
+  in under two minutes on 2 cores. I'll measure single-process throughput using
+  about 10,500 pairs (the dataset repeated seven times, with no caching, so
+  every repeat is fully processed).
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Processing 10,563 pairs took ~15.7s and 42 MB, well within limits. Now I'll
+  finish the CLI: parallel scoring with deterministic output order, suppressed
+  sqlglot warnings, tolerance for malformed lines, and a fuller report including
+  a confusion matrix, precision/recall/F1, and breakdowns by source/category
+  when labels are present.
+
+⏺ Write(sqleval/cli.py)
+  ⎿  Added 138 lines, removed 30 lines
+       1  import argparse
+       2  import json
+       3 -from collections import Counter                                
+       3 +import logging                                                 
+       4 +import os                                                      
+       5 +import sys                                                     
+       6 +import time                                                    
+       7 +from collections import Counter, defaultdict                   
+       8 +from multiprocessing import get_context                        
+       9  from pathlib import Path
+      10 +                                                               
+      11  from .equivalence import Verdict, compare
+      12  
+      13 +PARALLEL_THRESHOLD = 400  # below this many pairs, worker start
+         +-up costs more than it saves                                   
+      14  
+      15 +_SCHEMAS: dict[str, str] = {}                                  
+      16 +                                                               
+      17 +                                                               
+      18 +def _quiet():                                                  
+      19 +    logging.getLogger("sqlglot").setLevel(logging.ERROR)       
+      20 +                                                               
+      21 +                                                               
+      22  def load_schemas(schemas_dir: Path) -> dict[str, str]:
+      23 +    if not schemas_dir.is_dir():                               
+      24 +        return {}                                              
+      25      return {p.stem: p.read_text() for p in sorted(schemas_dir.g
+          lob("*.sql"))}
+      26  
+      27  
+     ...
+       29      predicted = pair.get("predicted")
+       30      if not isinstance(predicted, str) or not predicted.strip()
+           :
+       31          return Verdict(False, 0.0, "no_prediction")
+       32 +    gt = pair.get("ground_truth")                             
+       33 +    if not isinstance(gt, str) or not gt.strip():             
+       34 +        return Verdict(False, 0.0, "no_ground_truth")         
+       35      try:
+       17 -        return compare(pair["ground_truth"], predicted, schema
+          -s.get(pair.get("schema_id")))                                 
+       36 +        return compare(gt, predicted, schemas.get(pair.get("sc
+          +hema_id")))                                                   
+       37      except Exception as e:  # never let one pair abort the run
+       38          return Verdict(False, 0.0, f"error:{type(e).__name__}"
+           )
+       39  
+       40  
+       41 +def _init_worker(schemas):                                    
+       42 +    global _SCHEMAS                                           
+       43 +    _quiet()                                                  
+       44 +    _SCHEMAS = schemas                                        
+       45 +                                                              
+       46 +                                                              
+       47 +def _work(pair):                                              
+       48 +    return score_pair(pair, _SCHEMAS)                         
+       49 +                                                              
+       50 +                                                              
+       51 +def _workers(requested: int | None) -> int:                   
+       52 +    if requested:                                             
+       53 +        return max(1, requested)                              
+       54 +    try:                                                      
+       55 +        return max(1, len(os.sched_getaffinity(0)))           
+       56 +    except AttributeError:                                    
+       57 +        return max(1, os.cpu_count() or 1)                    
+       58 +                                                              
+       59 +                                                              
+       60 +def _read_pairs(path: Path):                                  
+       61 +    pairs, bad = [], 0                                        
+       62 +    with path.open() as f:                                    
+       63 +        for line in f:                                        
+       64 +            if not line.strip():                              
+       65 +                continue                                      
+       66 +            try:                                              
+       67 +                obj = json.loads(line)                        
+       68 +            except json.JSONDecodeError:                      
+       69 +                bad += 1                                      
+       70 +                continue                                      
+       71 +            if isinstance(obj, dict):                         
+       72 +                pairs.append(obj)                             
+       73 +            else:                                             
+       74 +                bad += 1                                      
+       75 +    return pairs, bad                                         
+       76 +                                                              
+       77 +                                                              
+       78  def main(argv=None) -> int:
+       23 -    ap = argparse.ArgumentParser(description="Score predicted 
+          -SQL against ground truth.")                                   
+       24 -    ap.add_argument("--schemas", required=True, type=Path)    
+       25 -    ap.add_argument("--pairs", required=True, type=Path)      
+       26 -    ap.add_argument("--output", required=True, type=Path)     
+       79 +    _quiet()                                                  
+       80 +    ap = argparse.ArgumentParser(description="Score predicted 
+          +SQL against ground truth (no execution, no LLMs).")           
+       81 +    ap.add_argument("--schemas", required=True, type=Path, hel
+          +p="directory of <schema_id>.sql DDL files")                   
+       82 +    ap.add_argument("--pairs", required=True, type=Path, help=
+          +"JSONL with id, schema_id, ground_truth, predicted")          
+       83 +    ap.add_argument("--output", required=True, type=Path, help
+          +="JSONL results: id, match, score")                           
+       84 +    ap.add_argument("--workers", type=int, default=None, help=
+          +"worker processes (default: available CPUs)")                 
+       85      args = ap.parse_args(argv)
+       86  
+       87 +    t0 = time.perf_counter()                                  
+       88      schemas = load_schemas(args.schemas)
+       30 -    reasons = Counter()                                       
+       31 -    n = matched = 0                                           
+       32 -    labeled = correct = 0                                     
+       89 +    pairs, bad_lines = _read_pairs(args.pairs)                
+       90  
+       34 -    with args.pairs.open() as fin, args.output.open("w") as fo
+          -ut:                                                           
+       35 -        for line in fin:                                      
+       36 -            if not line.strip():                              
+       37 -                continue                                      
+       38 -            pair = json.loads(line)                           
+       39 -            v = score_pair(pair, schemas)                     
+       40 -            fout.write(json.dumps({"id": pair.get("id"), "matc
+          -h": v.match,                                                  
+       41 -                                   "score": 1.0 if v.match els
+          -e v.score}) + "\n")                                           
+       42 -            n += 1                                            
+       43 -            matched += v.match                                
+       44 -            reasons[v.reason] += 1                            
+       45 -            if isinstance(pair.get("equivalent"), bool):      
+       46 -                labeled += 1                                  
+       47 -                correct += pair["equivalent"] == v.match      
+       91 +    workers = _workers(args.workers)                          
+       92 +    if workers > 1 and len(pairs) >= PARALLEL_THRESHOLD:      
+       93 +        methods = __import__("multiprocessing").get_all_start_
+          +methods()                                                     
+       94 +        ctx = get_context("fork" if "fork" in methods else "sp
+          +awn")                                                         
+       95 +        with ctx.Pool(workers, initializer=_init_worker, inita
+          +rgs=(schemas,)) as pool:                                      
+       96 +            verdicts = list(pool.imap(_work, pairs, chunksize=
+          +32))                                                          
+       97 +    else:                                                     
+       98 +        verdicts = [score_pair(p, schemas) for p in pairs]    
+       99  
+       49 -    print(f"pairs scored: {n}")                               
+       50 -    print(f"matched:      {matched} ({matched / n:.1%})" if n 
+          -else "matched:      0")                                       
+       51 -    if labeled:                                               
+       52 -        print(f"label accuracy: {correct}/{labeled} ({correct 
+          -/ labeled:.1%})")                                             
+       53 -    print("reasons:")                                         
+       54 -    for reason, count in reasons.most_common():               
+       55 -        print(f"  {reason}: {count}")                         
+      100 +    args.output.parent.mkdir(parents=True, exist_ok=True)     
+      101 +    with args.output.open("w") as f:                          
+      102 +        for p, v in zip(pairs, verdicts):                     
+      103 +            f.write(json.dumps({"id": p.get("id"), "match": v.
+          +match, "score": 1.0 if v.match else round(v.score, 4)})       
+      104 +                    + "\n")                                   
+      105 +                                                              
+      106 +    _report(pairs, verdicts, schemas, bad_lines, time.perf_cou
+          +nter() - t0, workers)                                         
+      107      return 0
+      108 +                                                              
+      109 +                                                              
+      110 +def _report(pairs, verdicts, schemas, bad_lines, elapsed, work
+          +ers):                                                         
+      111 +    n = len(pairs)                                            
+      112 +    matched = sum(v.match for v in verdicts)                  
+      113 +    print("SQL equivalence report")                           
+      114 +    print("======================")                           
+      115 +    print(f"pairs scored     : {n}" + (f"  ({bad_lines} malfor
+          +med input lines skipped)" if bad_lines else ""))              
+      116 +    print(f"matched          : {matched} ({matched / n:.1%})" 
+          +if n else "matched          : 0")                             
+      117 +    print(f"mean score       : {sum(1.0 if v.match else v.scor
+          +e for v in verdicts) / n:.4f}" if n else "")                  
+      118 +    unknown = sorted({str(p.get('schema_id')) for p in pairs i
+          +f p.get("schema_id") not in schemas})                         
+      119 +    if unknown:                                               
+      120 +        print(f"unknown schemas  : {', '.join(unknown[:10])} (
+          +scored without schema constraints)")                          
+      121 +    print(f"time             : {elapsed:.2f}s ({n / elapsed:.0
+          +f} pairs/s, {workers} worker(s))" if elapsed else "")         
+      122 +                                                              
+      123 +    print("\nverdict reasons:")                               
+      124 +    for reason, count in Counter(v.reason.split(":")[0] if v.r
+          +eason.startswith("error") else v.reason                       
+      125 +                                 for v in verdicts).most_commo
+          +n():                                                          
+      126 +        print(f"  {reason:32s} {count}")                      
+      127 +                                                              
+      128 +    by_schema = defaultdict(lambda: [0, 0])                   
+      129 +    for p, v in zip(pairs, verdicts):                         
+      130 +        s = by_schema[str(p.get("schema_id"))]                
+      131 +        s[0] += 1                                             
+      132 +        s[1] += v.match                                       
+      133 +    print("\nmatch rate by schema:")                          
+      134 +    for sid, (tot, m) in sorted(by_schema.items()):           
+      135 +        print(f"  {sid:32s} {m:5d}/{tot:<5d} {m / tot:6.1%}") 
+      136 +                                                              
+      137 +    labeled = [(p, v) for p, v in zip(pairs, verdicts) if isin
+          +stance(p.get("equivalent"), bool)]                            
+      138 +    if not labeled:                                           
+      139 +        return                                                
+      140 +    tp = sum(1 for p, v in labeled if v.match and p["equivalen
+          +t"])                                                          
+      141 +    fp = sum(1 for p, v in labeled if v.match and not p["equiv
+          +alent"])                                                      
+      142 +    fn = sum(1 for p, v in labeled if not v.match and p["equiv
+          +alent"])                                                      
+      143 +    tn = sum(1 for p, v in labeled if not v.match and not p["e
+          +quivalent"])                                                  
+      144 +    prec = tp / (tp + fp) if tp + fp else 1.0                 
+      145 +    rec = tp / (tp + fn) if tp + fn else 1.0                  
+      146 +    f1 = 2 * prec * rec / (prec + rec) if prec + rec else 0.0 
+      147 +    print(f"\nagainst labels ({len(labeled)} labeled pairs):")
+      148 +    print(f"  accuracy  {(tp + tn) / len(labeled):.1%}   preci
+          +sion {prec:.1%}   recall {rec:.1%}   F1 {f1:.3f}")            
+      149 +    print(f"  confusion: TP {tp}  FP {fp}  FN {fn}  TN {tn}") 
+      150 +    for field in ("source", "category"):                      
+      151 +        groups = defaultdict(lambda: [0, 0])                  
+      152 +        for p, v in labeled:                                  
+      153 +            if field in p:                                    
+      154 +                g = groups[str(p[field])]                     
+      155 +                g[0] += 1                                     
+      156 +                g[1] += v.match == p["equivalent"]            
+      157 +        if groups and len(groups) <= 60:                      
+      158 +            print(f"\n  accuracy by {field}:")                
+      159 +            for k, (tot, ok) in sorted(groups.items(), key=lam
+          +bda kv: (kv[1][1] / kv[1][0], kv[0])):                        
+      160 +                print(f"    {k:34s} {ok:5d}/{tot:<5d} {ok / to
+          +t:6.1%}")                                                     
+      161 +                                                              
+      162 +                                                              
+      163 +if __name__ == "__main__":                                    
+      164 +    sys.exit(main())                                          
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ With 2 workers processing 10,563 pairs in 8.8s and matching output, the
+  harness hits 97.5% accuracy, 100% precision, and 94.3% recall (perfect on
+  automatic/malformed categories, with misses limited to hand-written pairs).
+  Now I'll verify it works from a clean pip install on Python 3.12 using only
+  the requirements file, since that's how the grader will set things up.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The clean install works: same results as the development environment, exit
+  status 0. Last, I'll fill in the README sections on how scoring works and its
+  known limitations.
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Bash(.venv/bin/python - <<'EOF'
+      import pathlib…)
+  ⎿  Updated README.md (+126 -5)
+       7  ## Layout
+       8  
+       9  ```
+      10 -score                   # scoring harness CLI                  
+      11 -requirements.txt        # Python dependencies for score        
+      10 +score                   # scoring harness CLI (entry point -> s
+         +qleval/cli.py)                                                 
+      11 +requirements.txt        # harness dependencies: sqlglot, pglast
+      12  sqleval/                # harness implementation
+      13 -generator/              # programs used to generate the dataset
+      13 +  validate.py           #   syntax gate (PostgreSQL's own parse
+         +r via pglast)                                                  
+      14 +  schema.py             #   DDL -> catalog (columns, NOT NULL, 
+         +PK/UNIQUE, FKs, enum labels)                                   
+      15 +  canonical.py          #   equivalence-preserving canonicaliza
+         +tion                                                           
+      16 +  equivalence.py        #   compare(): gate -> fast path -> can
+         +onical comparison -> partial score                             
+      17 +  cli.py                #   batch scoring, parallelism, summary
+         + report                                                        
+      18 +  eval_dev.py           #   dev tool: list false positives / ne
+         +gatives on a labeled file                                      
+      19 +generator/              # programs used to generate the dataset
+         + (requirements in generator/requirements.txt)                  
+      20  dataset/
+      21    schemas/<id>.sql      # one DDL file per schema
+      22    queries.jsonl         # NL questions + target SQL
+     ...
+      31  python3.12 -m venv .venv && source .venv/bin/activate
+      32  pip install -r requirements.txt
+      33  ./score --schemas dataset/schemas --pairs dataset/pairs.jsonl -
+          -output results.jsonl
+      34 +python -m unittest discover -s tests                       # bo
+         +undary tests for each rewrite rule                             
+      35 +python -m sqleval.eval_dev --show fn                       # in
+         +spect misclassified labeled pairs                              
+      36  ```
+      37  
+      38  ## Dataset design
+     ...
+      187  A harness that always answers "not equivalent" scores 56.9% on
+            this set.
+      188  
+      189  ## How scoring works
+      182 -_TODO_                                                        
+      190 +                                                              
+      191 +The harness never executes SQL and never calls a model. It pro
+          +ves equivalence by rewriting both                             
+      192 +queries into a canonical form, using only rewrites that preser
+          +ve the result on **every** database                           
+      193 +satisfying the schema. A pair matches when the two canonical f
+          +orms are identical. When a rewrite's                          
+      194 +precondition can't be proven from the schema, the rewrite is s
+          +kipped. So the harness is                                     
+      195 +deliberately one-sided: a missed equivalence becomes a false n
+          +egative, but it never claims a                                
+      196 +match it can't justify.                                       
+      197 +                                                              
+      198 +For each pair (`sqleval/equivalence.py`):                     
+     … 109 more lines (ctrl+o to expand)
+
+⏺ The README is complete. One untested path remains: a pair whose schema_id
+  isn't among the schema files, plus input lines with missing or malformed
+  fields. I'll run a quick check on both.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Everything checks out except e1 — I'd disabled all rewrites when no schema is
+  present, even ones that don't need it. Since the resolver already handles a
+  missing schema safely, I'll remove that gate.
+
+⏺ Bash(.venv/bin/python - <<'EOF'
+      import pathlib…)
+  ⎿  Updated sqleval/canonical.py (+3 -2)
+      1776      tree = _unique_aliases(tree)
+      1777      tree = _resolve_order_aliases(tree)
+      1778      tree = _positional_derived_columns(tree)
+      1779 -    if ctx.catalog is not None:                              
+      1780 -        R = Resolver(ctx, tree)                              
+      1779 +    # without a schema every catalog lookup returns "unknown"
+           +, so only schema-free rewrites fire                          
+      1780 +    R = Resolver(ctx, tree)                                  
+      1781 +    if True:                                                 
+      1782          tree = _except_on_key_to_not_exists(tree, R, ctx)
+      1783          R.refresh(tree)
+      1784          tree = tree.transform(lambda n: _norm_expr(n, R))
+
+⏺ Removing the if True: leftover:
+
+⏺ Bash(.venv/bin/python - <<'EOF'
+      import pathlib…)
+  ⎿  Updated sqleval/canonical.py (+6 -7)
+      1778      tree = _positional_derived_columns(tree)
+      1779      # without a schema every catalog lookup returns "unknown"
+            , so only schema-free rewrites fire
+      1780      R = Resolver(ctx, tree)
+      1781 -    if True:                                                 
+      1782 -        tree = _except_on_key_to_not_exists(tree, R, ctx)    
+      1781 +    tree = _except_on_key_to_not_exists(tree, R, ctx)        
+      1782 +    R.refresh(tree)                                          
+      1783 +    tree = tree.transform(lambda n: _norm_expr(n, R))        
+      1784 +    for _ in range(2):  # rewrites in outer scopes can enable
+           + rewrites in inner ones                                      
+      1785          R.refresh(tree)
+      1786 +        for sel in reversed([s for s in tree.walk(bfs=False) 
+           +if isinstance(s, exp.Select)]):                              
+      1787 +            _scope_rewrites(sel, R, ctx)                     
+      1788          tree = tree.transform(lambda n: _norm_expr(n, R))
+      1785 -        for _ in range(2):  # rewrites in outer scopes can en
+           -able rewrites in inner ones                                  
+      1786 -            R.refresh(tree)                                  
+      1787 -            for sel in reversed([s for s in tree.walk(bfs=Fal
+           -se) if isinstance(s, exp.Select)]):                          
+      1788 -                _scope_rewrites(sel, R, ctx)                 
+      1789 -            tree = tree.transform(lambda n: _norm_expr(n, R))
+      1789      _clean_exists(tree)
+      1790      _strip_orders(tree, keep_outer_order)
+      1791      return serialize(tree)
+
+⏺ The scoring harness is finished and gets 97.5% of the 1,509 labeled pairs
+  right, with no false positives. It runs offline: no queries are executed and
+  no models are called.
+
+  ┌─────────────────────────┬───────────────────────────────────────────────┐
+  │                         │                                               │
+  ├─────────────────────────┼───────────────────────────────────────────────┤
+  │ Accuracy                │ 97.5%                                         │
+  ├─────────────────────────┼───────────────────────────────────────────────┤
+  │ Precision (matches that │ 100%: 0 false positives                       │
+  │  were right)            │                                               │
+  ├─────────────────────────┼───────────────────────────────────────────────┤
+  │ Recall (equivalent      │ 94.3%: 37 misses, all hand-written cases      │
+  │ pairs found)            │                                               │
+  ├─────────────────────────┼───────────────────────────────────────────────┤
+  │ Speed                   │ 10,563 pairs in 8.8 s on 2 workers, peak      │
+  │                         │ memory 61 MB                                  │
+  ├─────────────────────────┼───────────────────────────────────────────────┤
+  │ Determinism             │ identical output with 1 or 2 workers, and     │
+  │                         │ from a clean Python 3.12 install              │
+  └─────────────────────────┴───────────────────────────────────────────────┘
+
+  How it decides. It only reports a match it can prove. When a rewrite's
+  precondition can't be established from the schema, the rewrite is skipped and
+  the pair comes back as "no match".
+  1. Validity check. The prediction must parse with Postgres's own parser
+     (pglast) as exactly one query, and every table and column must exist under
+     Postgres's case rules. It's also rejected for an enum value that isn't a
+     label of its type, or a selected column that is neither in GROUP BY nor
+     covered by a grouped primary key. Postgres raises an error for both.
+  2. Fast path. Identical parse trees match immediately.
+  3. Canonical form. Both queries are rewritten into a canonical form and
+     compared. Each rewrite preserves the result on every database the schema
+     allows, for example:
+     - NOT IN becomes NOT EXISTS only when neither side can be NULL;
+     - a correlated COUNT subquery becomes LEFT JOIN + GROUP BY;
+     - a join to a parent table is dropped when only its key is used;
+     - GROUP BY and DISTINCT are simplified using primary and unique keys;
+     - outer ORDER BY is ignored when the ground truth has none.
+  4. Partial credit. Valid non-matches get a 0–0.95 similarity score; invalid
+     predictions score 0.
+
+  Soundness checks:
+  - Boundary unit tests (tests/test_equivalence.py): each rule is tested on a
+    pair where its precondition holds, next to a near-identical pair where it
+    doesn't. These tests caught two real false positives, both caused by an
+    aggregate inside a subquery being treated as part of the outer query. Both
+    are fixed.
+  - Stress test: every breaking mutation applied to every target query gave 586
+    attempts and no false matches. All 1,448 equivalence-preserving rewrites
+    were recognized.
+
+  Known limitations (in the README):
+  - The 37 remaining misses are harder equivalences: pre-aggregated subqueries
+    vs. a direct GROUP BY, ROW_NUMBER vs. DISTINCT ON, algebraic identities like
+    SUM(a - b) = SUM(a) - SUM(b), and date_trunc comparisons.
+  - Type errors and runtime errors such as division by zero aren't detected.
+  - When sqlglot can't parse something Postgres accepts (e.g. BETWEEN
+    SYMMETRIC), the pair is reported as "unsupported" rather than "invalid", and
+    only an identical parse tree can match.
+
+  For the live fix in the walkthrough: python -m sqleval.eval_dev --show fn
+  lists the misclassified pairs. A new rule goes into _scope_rewrites in
+  sqleval/canonical.py, with a matching test pair in the unit tests.
+  requirements.txt now pins sqlglot and pglast.
+
+  Nothing is committed yet. What's left: exporting the session history into
+  session/, then committing.

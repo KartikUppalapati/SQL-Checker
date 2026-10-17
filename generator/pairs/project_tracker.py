@@ -1,0 +1,177 @@
+"""Hand-written labeled predictions for project_tracker queries. See campus.py for the format."""
+E, N = True, False
+
+PAIRS = {
+    1: [
+        (E, "SELECT p.name, COUNT(*) FROM projects p JOIN tasks t ON t.project_id = p.id WHERE t.status IN ('todo', 'in_progress', 'blocked') GROUP BY p.id, p.name",
+         "task_status has exactly these four labels and status is NOT NULL"),
+        (N, "SELECT p.name, COUNT(*) FROM projects p JOIN tasks t ON t.project_id = p.id WHERE t.status = 'todo' GROUP BY p.id, p.name",
+         "only todo, not in_progress/blocked"),
+        (N, "SELECT p.name, COUNT(t.id) FROM projects p LEFT JOIN tasks t ON t.project_id = p.id AND t.status <> 'done' GROUP BY p.id, p.name",
+         "projects with no open tasks appear with 0"),
+    ],
+    2: [
+        (E, "SELECT t.id, t.name FROM tasks t JOIN projects p ON p.id = t.project_id WHERE t.assignee_id IS NULL AND p.archived <> 'yes'",
+         "yes_no has two labels and archived is NOT NULL"),
+        (N, "SELECT t.id, t.name FROM tasks t JOIN projects p ON p.id = t.project_id WHERE t.assignee_id = NULL AND p.archived = 'no'",
+         "= NULL is never true"),
+        (N, "SELECT t.id, t.name FROM tasks t WHERE t.assignee_id IS NULL",
+         "includes archived projects"),
+    ],
+    3: [
+        (E, "SELECT u.name FROM users u WHERE (SELECT COUNT(*) FROM project_members pm WHERE pm.user_id = u.id) > 2",
+         "correlated count"),
+        (N, "SELECT u.name FROM users u JOIN project_members pm ON pm.user_id = u.id GROUP BY u.name HAVING COUNT(*) > 2",
+         "users sharing a name are merged"),
+        (N, "SELECT u.name FROM users u JOIN projects p ON p.owner_id = u.id GROUP BY u.id, u.name HAVING COUNT(*) > 2",
+         "owned projects, not memberships"),
+    ],
+    4: [
+        (E, "SELECT t.id FROM tasks t WHERE EXISTS (SELECT 1 FROM task_dependencies d JOIN tasks b ON b.id = d.depends_on_task_id WHERE d.task_id = t.id AND b.status <> 'done')",
+         "EXISTS over tasks; task_id is a NOT NULL FK"),
+        (N, "SELECT d.task_id FROM task_dependencies d JOIN tasks blocker ON blocker.id = d.depends_on_task_id WHERE blocker.status <> 'done'",
+         "one row per open blocker (missing DISTINCT)"),
+        (N, "SELECT DISTINCT d.task_id FROM task_dependencies d JOIN tasks t ON t.id = d.task_id WHERE t.status <> 'done'",
+         "checks the dependent task's status instead of the blocker's"),
+    ],
+    5: [
+        (E, "SELECT c.name, (SELECT p.name FROM tasks p WHERE p.id = c.parent_task_id) FROM tasks c WHERE c.parent_task_id IS NOT NULL",
+         "scalar subquery over the FK"),
+        (N, "SELECT child.name, parent.name FROM tasks child LEFT JOIN tasks parent ON parent.id = child.parent_task_id",
+         "includes top-level tasks with NULL parent"),
+        (N, "SELECT child.name, parent.name FROM tasks child JOIN tasks parent ON child.id = parent.parent_task_id",
+         "self-join direction reversed"),
+    ],
+    6: [
+        (E, """WITH RECURSIVE tree(id) AS (
+    SELECT 100
+    UNION ALL
+    SELECT t.id FROM tasks t JOIN tree ON t.parent_task_id = tree.id
+)
+SELECT id FROM tree WHERE id <> 100""",
+         "seeded with the root and filtered out; a task cannot be its own parent's descendant without a cycle, which makes both diverge"),
+        (N, "SELECT id FROM tasks WHERE parent_task_id = 100",
+         "direct children only"),
+        (N, """WITH RECURSIVE tree AS (
+    SELECT id FROM tasks WHERE id = 100
+    UNION ALL
+    SELECT t.id FROM tasks t JOIN tree ON t.parent_task_id = tree.id
+)
+SELECT id FROM tree""",
+         "includes task 100 itself"),
+    ],
+    7: [
+        (E, "SELECT u.name, COALESCE((SELECT SUM(te.hours) FROM time_entries te WHERE te.user_id = u.id AND te.logged_on BETWEEN '2024-01-01' AND '2024-12-31'), 0) FROM users u",
+         "correlated sum; BETWEEN is inclusive and exact for DATE"),
+        (N, "SELECT u.name, COALESCE(SUM(te.hours), 0) FROM users u LEFT JOIN time_entries te ON te.user_id = u.id WHERE te.logged_on >= DATE '2024-01-01' AND te.logged_on < DATE '2025-01-01' GROUP BY u.id, u.name",
+         "date filter in WHERE turns the LEFT JOIN into an inner join"),
+        (N, "SELECT u.name, SUM(te.hours) FROM users u LEFT JOIN time_entries te ON te.user_id = u.id AND te.logged_on >= DATE '2024-01-01' AND te.logged_on < DATE '2025-01-01' GROUP BY u.id, u.name",
+         "NULL instead of 0 for users with no hours"),
+    ],
+    8: [
+        (E, "SELECT t.id, t.estimate_hours, SUM(te.hours) FROM tasks t JOIN time_entries te ON te.task_id = t.id GROUP BY t.id, t.estimate_hours HAVING SUM(te.hours) > t.estimate_hours",
+         "comparison with a NULL estimate is never true, so the WHERE filter is redundant"),
+        (N, "SELECT t.id, t.estimate_hours, SUM(te.hours) FROM tasks t JOIN time_entries te ON te.task_id = t.id WHERE te.hours > t.estimate_hours GROUP BY t.id, t.estimate_hours",
+         "compares individual entries instead of the total"),
+        (N, "SELECT t.id, t.estimate_hours, SUM(te.hours) FROM tasks t JOIN time_entries te ON te.task_id = t.id WHERE t.estimate_hours IS NOT NULL GROUP BY t.id, t.estimate_hours HAVING SUM(te.hours) >= t.estimate_hours",
+         ">= includes exactly-on-estimate"),
+    ],
+    9: [
+        (E, "SELECT p.name, u.name FROM users u JOIN projects p ON p.owner_id = u.id",
+         "aliases and join order"),
+        (E, "SELECT p.name, (SELECT u.name FROM users u WHERE u.id = p.owner_id) FROM projects p",
+         "scalar subquery: owner_id is a NOT NULL FK"),
+        (N, "SELECT projects.name, users.name FROM projects JOIN users ON users.team_id = projects.team_id",
+         "joins on team, listing every team member"),
+    ],
+    10: [
+        (E, "SELECT project_id, AVG(EXTRACT(EPOCH FROM completed_at - created_at) / 86400) FROM tasks WHERE completed_at IS NOT NULL AND status = 'done' GROUP BY 1",
+         "reordered"),
+        (N, "SELECT project_id, AVG(EXTRACT(EPOCH FROM completed_at - created_at) / 86400) FROM tasks WHERE status = 'done' GROUP BY project_id",
+         "projects whose done tasks all lack completed_at appear with NULL"),
+        (N, "SELECT project_id, AVG(EXTRACT(DAY FROM completed_at - created_at)) FROM tasks WHERE status = 'done' AND completed_at IS NOT NULL GROUP BY project_id",
+         "takes only the days field of the interval (drops hours)"),
+    ],
+    11: [
+        (E, "SELECT name FROM labels WHERE id NOT IN (SELECT label_id FROM task_labels)",
+         "NOT IN is safe: task_labels.label_id is NOT NULL"),
+        (E, "SELECT name FROM labels EXCEPT SELECT l.name FROM labels l JOIN task_labels tl ON tl.label_id = l.id",
+         "EXCEPT is safe: label name is UNIQUE NOT NULL"),
+        (N, "SELECT DISTINCT l.name FROM labels l LEFT JOIN task_labels tl ON tl.label_id = l.id WHERE tl.task_id IS NOT NULL",
+         "labels that are used"),
+    ],
+    12: [
+        (E, "SELECT name, email FROM users WHERE team_id IS NULL AND is_admin <> 'no'",
+         "yes_no domain"),
+        (N, "SELECT name FROM users WHERE is_admin = 'yes' AND team_id IS NULL",
+         "missing email column"),
+        (N, "SELECT name, email FROM users WHERE is_admin = 'yes' AND team_id = 0",
+         "0 is not NULL"),
+    ],
+    13: [
+        (E, "SELECT tm.name, COUNT(DISTINCT p.id), COUNT(DISTINCT u.id) FROM teams tm LEFT JOIN projects p ON p.team_id = tm.id LEFT JOIN users u ON u.team_id = tm.id GROUP BY tm.id, tm.name",
+         "fan-out neutralized by COUNT(DISTINCT pk)"),
+        (N, "SELECT tm.name, COUNT(p.id), COUNT(u.id) FROM teams tm LEFT JOIN projects p ON p.team_id = tm.id LEFT JOIN users u ON u.team_id = tm.id GROUP BY tm.id, tm.name",
+         "join fan-out multiplies both counts"),
+        (N, "SELECT tm.name, COUNT(DISTINCT p.id), COUNT(DISTINCT u.id) FROM teams tm JOIN projects p ON p.team_id = tm.id JOIN users u ON u.team_id = tm.id GROUP BY tm.id, tm.name",
+         "inner joins drop teams without projects or users"),
+    ],
+    14: [
+        (E, "SELECT u.name, COUNT(*) FROM users u JOIN tasks t ON t.assignee_id = u.id WHERE t.status = 'done' GROUP BY u.id, u.name ORDER BY COUNT(*) DESC LIMIT 5",
+         "join order"),
+        (N, "SELECT u.name, COUNT(*) AS n FROM tasks t JOIN users u ON u.id = t.assignee_id WHERE t.status = 'done' GROUP BY u.name ORDER BY n DESC LIMIT 5",
+         "users sharing a name are merged"),
+        (N, "SELECT u.name, COUNT(*) AS n FROM tasks t JOIN users u ON u.id = t.assignee_id GROUP BY u.id, u.name ORDER BY n DESC LIMIT 5",
+         "counts all assigned tasks"),
+    ],
+    15: [
+        (E, "SELECT id, name FROM tasks WHERE name ~* 'bug'",
+         "case-insensitive regex"),
+        (E, "SELECT id, name FROM tasks WHERE lower(name) LIKE '%bug%'",
+         "lower() + LIKE"),
+        (N, "SELECT id, name FROM tasks WHERE name LIKE '%bug%'",
+         "LIKE is case-sensitive"),
+        (N, "SELECT id, name FROM tasks WHERE name ILIKE 'bug%'",
+         "prefix only"),
+    ],
+    16: [
+        (E, "SELECT DISTINCT name FROM projects p WHERE due_date < '2024-10-01' AND EXISTS (SELECT 1 FROM tasks t WHERE t.project_id = p.id AND t.status <> 'done')",
+         "EXISTS with DISTINCT"),
+        (N, "SELECT p.name FROM projects p JOIN tasks t ON t.project_id = p.id WHERE p.due_date < DATE '2024-10-01' AND t.status <> 'done'",
+         "one row per open task"),
+        (N, "SELECT DISTINCT p.name FROM projects p JOIN tasks t ON t.project_id = p.id WHERE p.due_date < CURRENT_DATE AND t.status <> 'done'",
+         "CURRENT_DATE is not the fixed cutoff"),
+    ],
+    17: [
+        (E, "SELECT status, COUNT(id) FROM tasks GROUP BY 1",
+         "ordinal GROUP BY"),
+        (N, "SELECT status, COUNT(DISTINCT project_id) FROM tasks GROUP BY status",
+         "counts projects"),
+        (N, "SELECT status, COUNT(*) FROM tasks WHERE status <> 'done' GROUP BY status",
+         "drops the done group"),
+    ],
+    18: [
+        (E, "SELECT u.name, p.name FROM projects p JOIN users u ON u.id = p.owner_id LEFT JOIN project_members pm ON pm.project_id = p.id AND pm.user_id = p.owner_id WHERE pm.user_id IS NULL",
+         "LEFT JOIN anti-join"),
+        (N, "SELECT u.name, p.name FROM projects p JOIN users u ON u.id = p.owner_id WHERE NOT EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = p.id AND pm.user_id = p.owner_id AND pm.role = 'owner')",
+         "also returns owners who are members with a non-owner role"),
+        (N, "SELECT u.name, p.name FROM projects p JOIN users u ON u.id = p.owner_id WHERE NOT EXISTS (SELECT 1 FROM project_members pm WHERE pm.user_id = p.owner_id)",
+         "membership in any project, not this one"),
+    ],
+    19: [
+        (E, "SELECT l.name, COUNT(*) FROM task_labels tl JOIN labels l ON l.id = tl.label_id JOIN tasks t ON t.id = tl.task_id WHERE t.priority = 1 GROUP BY l.name",
+         "label name is UNIQUE NOT NULL"),
+        (N, "SELECT l.name, COUNT(*) FROM task_labels tl JOIN labels l ON l.id = tl.label_id JOIN tasks t ON t.id = tl.task_id WHERE t.priority <= 1 GROUP BY l.id, l.name",
+         "priority is not constrained to be >= 1"),
+        (N, "SELECT l.name, COUNT(*) FROM task_labels tl JOIN labels l ON l.id = tl.label_id GROUP BY l.id, l.name",
+         "all priorities"),
+    ],
+    20: [
+        (E, "SELECT p.name, u.name FROM project_members pm JOIN projects p ON p.id = pm.project_id JOIN users u ON u.id = pm.user_id WHERE pm.role = 'maintainer'::member_role",
+         "explicit enum cast"),
+        (N, "SELECT p.name, u.name FROM project_members pm JOIN projects p ON p.id = pm.project_id JOIN users u ON u.id = pm.user_id WHERE pm.role IN ('maintainer', 'owner')",
+         "includes owners"),
+        (N, "SELECT u.name, p.name FROM project_members pm JOIN projects p ON p.id = pm.project_id JOIN users u ON u.id = pm.user_id WHERE pm.role = 'maintainer'",
+         "columns swapped"),
+    ],
+}

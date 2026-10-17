@@ -1,0 +1,2 @@
+sqlglot==25.34.1
+pglast==8.6
