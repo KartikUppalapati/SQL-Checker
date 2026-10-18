@@ -17,4 +17,6 @@ SCHEMA_META = {
                         "quoting": "quoted", "flags": "int_0_1"},
     "project_tracker": {"shape": ["many_to_many", "self_ref", "self_ref_m2m"], "naming": "snake_case",
                         "quoting": "unquoted", "flags": "enum"},
+    "rideshare":       {"shape": ["star", "self_ref"], "naming": "snake_case",
+                        "quoting": "unquoted", "flags": "boolean"},
 }

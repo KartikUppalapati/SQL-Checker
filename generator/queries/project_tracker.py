@@ -174,4 +174,17 @@ ORDER BY project_id, created_at DESC, id DESC""",
 FROM time_entries
 GROUP BY user_id, logged_on""",
      ['window_frame', 'dates']),
+
+    ('Count tasks per project and status, with a subtotal row per project and a grand total row. Add a column that tells the three kinds of row apart.',
+     """SELECT project_id, status, COUNT(*) AS tasks, GROUPING(project_id, status) AS level
+FROM tasks
+GROUP BY ROLLUP (project_id, status)""",
+     ['grouping_sets', 'grouping_func', 'flag_enum']),
+
+    ('How many tasks were completed in each month? Show the month as text in the form YYYY-MM.',
+     """SELECT to_char(completed_at, 'YYYY-MM') AS month, COUNT(*) AS completed
+FROM tasks
+WHERE completed_at IS NOT NULL
+GROUP BY to_char(completed_at, 'YYYY-MM')""",
+     ['date_format', 'nullable']),
 ]

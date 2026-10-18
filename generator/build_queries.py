@@ -20,6 +20,7 @@ from sqlglot.schema import MappingSchema
 
 from generator import queries as queries_pkg
 from generator.schema_meta import SCHEMA_META
+from sqleval.canonical import parse_postgres
 from sqleval.schema import load_catalog, norm_ident
 from sqleval.validate import parse_tree
 
@@ -72,9 +73,11 @@ def validate_query(sql: str, schema: MappingSchema) -> exp.Expression:
     if len(stmts) != 1 or type(stmts[0].stmt).__name__ != "SelectStmt":
         raise ValueError("target must be exactly one SELECT statement")
     parse_tree(sql)  # the evaluator's own gate (e.g. functions PostgreSQL does not have)
-    tree = sqlglot.parse_one(sql, read="postgres")
+    tree = parse_postgres(sql)
     cte_names = {norm_ident(c.args["alias"].this) for c in tree.find_all(exp.CTE)}
     for t in tree.find_all(exp.Table):
+        if not isinstance(t.this, exp.Identifier):
+            continue  # a table function in FROM, such as generate_series(...)
         name = norm_ident(t.this)
         if name not in cte_names and not schema.find(exp.table_(exp.to_identifier(name, quoted=True))):
             raise ValueError(f"unknown table {name!r}")

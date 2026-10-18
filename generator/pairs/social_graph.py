@@ -39,6 +39,8 @@ PAIRS = {
          "a count is never NULL"),
         (N, 'SELECT u."userName", COUNT(f."followerId") AS followers FROM "users" u LEFT JOIN "follows" f ON f."followeeId" = u."id" AND f."muted" = \'off\' GROUP BY u."id", u."userName" ORDER BY followers DESC',
          "muted follows are not counted"),
+        (E, '''SELECT u."userName", COUNT(f."followerId") AS followers FROM "users" u LEFT JOIN "follows" f ON f."followeeId" = u."id" GROUP BY u."id", u."userName" ORDER BY followers DESC NULLS LAST''',
+         "a count is never NULL, so NULLS LAST changes nothing"),
     ],
     4: [
         (E, '''SELECT f."followeeId" FROM "follows" f JOIN "users" u ON u."id" = f."followerId" WHERE u."userName" = 'alice' EXCEPT ALL SELECT f."followeeId" FROM "follows" f JOIN "users" u ON u."id" = f."followerId" WHERE u."userName" = 'bob\'''',
@@ -67,6 +69,10 @@ PAIRS = {
          "WITH TIES changes nothing when the last sort key (the post id) is unique"),
         (N, 'SELECT p."id", COUNT(*) AS likes FROM "posts" p JOIN "postLikes" l ON l."postId" = p."id" GROUP BY p."id" ORDER BY likes DESC, p."id" DESC LIMIT 10',
          "ties broken by the highest post id"),
+        (N, '''SELECT p."id", COUNT(*) AS likes FROM "posts" p JOIN "postLikes" l ON l."postId" = p."id" GROUP BY p."id" ORDER BY likes DESC, p."id" LIMIT 10 OFFSET 10''',
+         "OFFSET 10 returns places 11-20"),
+        (E, '''SELECT p."id", COUNT(*) AS likes FROM "posts" p JOIN "postLikes" l ON l."postId" = p."id" GROUP BY p."id" ORDER BY likes DESC, p."id" OFFSET 0 LIMIT 10''',
+         "OFFSET 0 skips nothing; OFFSET may come before LIMIT"),
     ],
     6: [
         (E, '''SELECT p."id", (SELECT u."userName" FROM "posts" q JOIN "users" u ON u."id" = q."userId" WHERE q."id" = p."replyToPostId") FROM "posts" p WHERE p."replyToPostId" IS NOT NULL''',
@@ -87,6 +93,10 @@ PAIRS = {
          "CHECK constraints are not part of the equivalence definition: a value outside the CHECK list would make these differ"),
         (N, 'SELECT "userName" FROM "users" WHERE lower("emailNotifications") = \'off\'',
          "CHECK constraints are not part of the equivalence definition: a value outside the CHECK list would make these differ"),
+        (N, '''SELECT "userName" FROM "users" WHERE "emailNotifications" = FALSE''',
+         "INVALID: there is no character varying = boolean operator"),
+        (N, '''SELECT "userName" FROM "users" WHERE NOT "emailNotifications"''',
+         "INVALID: argument of NOT must be boolean, not character varying"),
     ],
     8: [
         (E, '''SELECT CASE WHEN "displayName" IS NULL THEN "userName" ELSE "displayName" END FROM "users"''',
@@ -99,6 +109,10 @@ PAIRS = {
          "userName is NOT NULL, so this always shows the username"),
         (N, 'SELECT NVL("displayName", "userName") FROM "users"',
          "INVALID: NVL is Oracle; PostgreSQL has no such function"),
+        (N, '''SELECT CONCAT("displayName", "userName") AS shown_name FROM "users"''',
+         "concatenates both names; CONCAT skips a NULL display name instead of falling back"),
+        (N, '''SELECT "displayName" || "userName" AS shown_name FROM "users"''',
+         "|| with a NULL display name gives NULL"),
     ],
     9: [
         (E, '''SELECT h."tagName", COUNT(ph."postId") FROM "postHashTags" ph JOIN "hashTags" h ON h."id" = ph."hashTagId" GROUP BY h."id", h."tagName" ORDER BY 2 DESC LIMIT 5''',
@@ -133,6 +147,10 @@ PAIRS = {
          "year extraction selects the same timestamps"),
         (E, 'SELECT "userId", date_trunc(\'month\', "createdAt"), COUNT(*) FROM "posts" WHERE "createdAt" >= TIMESTAMP \'2024-01-01\' AND "createdAt" < TIMESTAMP \'2024-01-01\' + INTERVAL \'1 year\' GROUP BY 1, 2',
          "timestamp + interval is the start of 2025"),
+        (E, '''SELECT "userId", date_trunc('month', "createdAt") AS month, COUNT(*) AS posts FROM "posts" WHERE "createdAt" >= TIMESTAMP '2024-01-01' AND "createdAt" < TIMESTAMP '2025-01-01' GROUP BY "userId", month''',
+         "GROUP BY the output alias"),
+        (N, '''SELECT "userId", date_trunc('month', "createdAt") AS month, COUNT(*) AS posts FROM "posts" WHERE "createdAt" >= TIMESTAMP '2024-01-01' AND "createdAt" < TIMESTAMP '2025-01-01' GROUP BY "userId", month HAVING posts > 0''',
+         "INVALID: an output alias cannot be used in HAVING"),
     ],
     12: [
         (E, '''SELECT DISTINCT f2."followeeId" FROM "follows" f1 JOIN "follows" f2 ON f2."followerId" = f1."followeeId"
@@ -158,6 +176,8 @@ WHERE f1."followerId" = (SELECT "id" FROM "users" WHERE "userName" = 'alice')
          "pre-aggregated like counts; COALESCE counts unliked posts as 0"),
         (N, 'SELECT AVG(c.n) FROM "posts" p LEFT JOIN (SELECT "postId", COUNT(*) AS n FROM "postLikes" GROUP BY "postId") c ON c."postId" = p."id"',
          "AVG skips the NULL counts of unliked posts"),
+        (N, '''SELECT AVG(COUNT(l."userId")) FROM "posts" p LEFT JOIN "postLikes" l ON l."postId" = p."id" GROUP BY p."id"''',
+         "INVALID: aggregate function calls cannot be nested"),
     ],
     14: [
         (E, '''SELECT COUNT(*) FROM "posts" WHERE "editedAt" IS NOT NULL''',
@@ -170,6 +190,10 @@ WHERE f1."followerId" = (SELECT "id" FROM "users" WHERE "userName" = 'alice')
          "COUNT(col) counts the non-NULL values"),
         (N, 'SELECT COUNT(DISTINCT "editedAt") FROM "posts"',
          "posts edited at the same moment count once"),
+        (N, '''SELECT SUM(CASE WHEN "editedAt" IS NOT NULL THEN 1 ELSE 0 END) FROM "posts"''',
+         "on an empty table SUM returns NULL where COUNT returns 0"),
+        (E, '''SELECT COUNT(*) FILTER (WHERE "editedAt" IS NOT NULL) FROM "posts"''',
+         "a filtered COUNT(*) counts the edited posts"),
     ],
     15: [
         (E, '''SELECT u."userName" FROM "users" u WHERE u."privateProfile" = 'on' AND (SELECT COUNT(*) FROM "follows" f WHERE f."followeeId" = u."id") > 100''',
@@ -194,6 +218,8 @@ WHERE f1."followerId" = (SELECT "id" FROM "users" WHERE "userName" = 'alice')
          "most recently edited, and DESC puts never-edited (NULL) posts first"),
         (E, 'SELECT u."id", p."id", p."body" FROM "users" u CROSS JOIN LATERAL (SELECT "id", "body" FROM "posts" WHERE "userId" = u."id" ORDER BY "createdAt" DESC LIMIT 1) p ORDER BY u."id"',
          "LATERAL top-1 per user; users without posts produce no row"),
+        (N, '''SELECT DISTINCT ON ("userId") "userId", "id", "body" FROM "posts" ORDER BY "createdAt" DESC, "userId"''',
+         "INVALID: SELECT DISTINCT ON expressions must match the initial ORDER BY expressions"),
     ],
     17: [
         (E, '''SELECT COUNT("id") FROM "posts" WHERE "commentsEnabled" = 'off' AND "replyToPostId" IS NULL''',
@@ -226,6 +252,10 @@ WHERE f1."followerId" = (SELECT "id" FROM "users" WHERE "userName" = 'alice')
          "a single grouping set is a plain GROUP BY"),
         (N, 'SELECT upper("countryCode"), COUNT(*) FROM "users" GROUP BY upper("countryCode")',
          "upper-casing merges codes that differ only in case"),
+        (E, '''SELECT "countryCode", COUNT(*) FROM "users" GROUP BY 1 ORDER BY 2 DESC''',
+         "the order does not matter here; positions name the select-list entries"),
+        (N, '''SELECT "countryCode", COUNT(*) FROM "users" GROUP BY 1 ORDER BY 3''',
+         "INVALID: ORDER BY position 3 is not in the select list"),
     ],
     20: [
         (E, '''SELECT "id" FROM "posts" WHERE "id" NOT IN (SELECT "replyToPostId" FROM "posts" WHERE "replyToPostId" IS NOT NULL)''',
@@ -252,6 +282,10 @@ WHERE f1."followerId" = (SELECT "id" FROM "users" WHERE "userName" = 'alice')
          'INVALID: quoted "userid" is case-sensitive; the column is "userId"'),
         (E, 'SELECT "userId" FROM "postLikes" WHERE "postId" = 42 UNION SELECT "userId" FROM "posts" WHERE "replyToPostId" = ANY (ARRAY[42])',
          "= ANY over a one-element array"),
+        (E, 'SELECT "userId" FROM "postLikes" WHERE "postId" = \'42\' UNION SELECT "userId" FROM "posts" WHERE "replyToPostId" = \'42\'',
+         "the literal '42' is read as a bigint"),
+        (N, '''SELECT "userId" FROM "postLikes" WHERE "postId" = '42a' UNION SELECT "userId" FROM "posts" WHERE "replyToPostId" = 42''',
+         '''INVALID: invalid input syntax for type bigint: "42a"'''),
     ],
     22: [
         (E, '''SELECT "userName", CASE WHEN "countryCode" IS NULL THEN 'unknown' ELSE "countryCode" END FROM "users"''',
@@ -276,6 +310,8 @@ WHERE f1."followerId" = (SELECT "id" FROM "users" WHERE "userName" = 'alice')
          "LIKE is case-sensitive"),
         (E, 'SELECT "id", length("body") FROM "posts" WHERE strpos(lower("body"), \'#postgres\') > 0',
          "substring search on the lower-cased body"),
+        (N, '''SELECT "id", length("body") AS "bodyLength" FROM "posts" WHERE "body" ILIKE '%#postgres%' AND "bodyLength" > 0''',
+         "INVALID: an output alias cannot be used in WHERE"),
     ],
     24: [
         (E, """SELECT u."userName", t."body" FROM "users" u
@@ -290,5 +326,33 @@ JOIN (SELECT "userId", "body", ROW_NUMBER() OVER (ORDER BY "createdAt" DESC, "id
       FROM "posts" WHERE "replyToPostId" IS NULL) t ON t."userId" = u."id"
 WHERE t.rn <= 3""",
          "without PARTITION BY this is the three newest posts overall"),
+    ],
+    25: [
+        (E, 'SELECT "id" FROM "posts" WHERE "replyToPostId" IS NULL AND "body" SIMILAR TO \'%#[A-Za-z]%\'',
+         "SIMILAR TO must match the whole body, so the pattern is wrapped in %"),
+        (N, 'SELECT "id" FROM "posts" WHERE "replyToPostId" IS NULL AND "body" LIKE \'%#%\'',
+         "a '#' followed by a digit, a space or nothing also matches"),
+        (E, 'SELECT "id" FROM "posts" WHERE "replyToPostId" IS NULL AND "body" ~* \'#[a-z]\'',
+         "case-insensitively, [a-z] matches A-Z too"),
+        (N, 'SELECT "id" FROM "posts" WHERE "replyToPostId" IS NULL AND "body" ~ \'#[a-z]\'',
+         "case-sensitive: '#Postgres' no longer matches"),
+        (N, 'SELECT "id" FROM "posts" WHERE "replyToPostId" IS NULL AND "body" ~ \'^#[A-Za-z]\'',
+         "anchored: the hashtag must start the body"),
+        (N, 'SELECT "id" FROM "posts" WHERE "body" ~ \'#[A-Za-z]\'',
+         "replies are included"),
+        (N, 'SELECT "id" FROM "posts" WHERE "replyToPostId" IS NULL AND "body" ~ \'#[[:alpha:]]\'',
+         "[[:alpha:]] also matches non-ASCII letters such as 'é'"),
+    ],
+    26: [
+        (N, '''SELECT u."userName", percent_rank() OVER (ORDER BY COUNT(f."followerId")) AS share FROM "users" u LEFT JOIN "follows" f ON f."followeeId" = u."id" GROUP BY u."id", u."userName"''',
+         "percent_rank is (rank - 1) / (n - 1), the share strictly below, not the share at or below"),
+        (N, '''SELECT u."userName", cume_dist() OVER (ORDER BY COUNT(f."followerId")) AS share FROM "users" u JOIN "follows" f ON f."followeeId" = u."id" GROUP BY u."id", u."userName"''',
+         "an inner join drops users with no followers from both the rows and the distribution"),
+        (E, '''SELECT u."userName", cume_dist() OVER w AS share FROM "users" u LEFT JOIN "follows" f ON f."followeeId" = u."id" GROUP BY u."id", u."userName" WINDOW w AS (ORDER BY COUNT(f."followerId") ASC)''',
+         "a named window with an explicit ASC"),
+        (N, '''SELECT u."userName", cume_dist() OVER (ORDER BY COUNT(*)) AS share FROM "users" u LEFT JOIN "follows" f ON f."followeeId" = u."id" GROUP BY u."id", u."userName"''',
+         "COUNT(*) counts a user with no followers as 1, tying them with users who have one"),
+        (N, '''SELECT u."userName", cume_dist() OVER (ORDER BY COUNT(f."followerId") DESC) AS share FROM "users" u LEFT JOIN "follows" f ON f."followeeId" = u."id" GROUP BY u."id", u."userName"''',
+         "the share with at least as many followers"),
     ],
 }

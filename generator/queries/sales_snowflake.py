@@ -214,4 +214,23 @@ JOIN DimCalendar d ON d.DateId = f.DateId
 GROUP BY d.CalendarDate
 ORDER BY d.CalendarDate""",
      ['window_frame']),
+
+    ("Show revenue for Germany (DE), France (FR) and Spain (ES) next to each country's revenue target: DE 100000, FR 80000, ES 50000. Only countries with sales appear.",
+     """SELECT co.Name, t.Target, SUM(f.Quantity * f.UnitPrice) AS Revenue
+FROM (VALUES ('DE', 100000), ('FR', 80000), ('ES', 50000)) AS t(IsoCode, Target)
+JOIN DimCountry co ON co.IsoCode = t.IsoCode
+JOIN DimCity ci ON ci.CountryId = co.CountryId
+JOIN DimStore s ON s.CityId = ci.CityId
+JOIN FactOrderLine f ON f.StoreId = s.StoreId
+GROUP BY co.CountryId, co.Name, t.Target""",
+     ['values_list', 'multi_join']),
+
+    ('For each category, list the distinct brand names of its products as an alphabetically sorted array. Products without a brand are ignored.',
+     """SELECT cat.Name, array_agg(DISTINCT b.Name ORDER BY b.Name) AS Brands
+FROM DimProduct p
+JOIN DimBrand b ON b.BrandId = p.BrandId
+JOIN DimSubcategory sc ON sc.SubcategoryId = p.SubcategoryId
+JOIN DimCategory cat ON cat.CategoryId = sc.CategoryId
+GROUP BY cat.CategoryId, cat.Name""",
+     ['ordered_agg', 'nullable']),
 ]

@@ -32,6 +32,7 @@ from generator.build_queries import validate_query
 from generator.mutations import (EQ_MUTATIONS, EXPECT_INVALID, MALFORMED_KINDS, NEQ_MUTATIONS,
                                  malformed, parse, pg_ast, roundtrip_faithful)
 from generator.schema_meta import SCHEMA_META
+from sqleval.equivalence import invalid_reason
 from sqleval.schema import load_catalog
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -66,12 +67,14 @@ def ddl_names(ddl: str) -> set[str]:
     return {w for w in re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", body) if w != w.lower() and w != w.upper()}
 
 
-def is_valid(sql, schema) -> bool:
+def is_valid(sql, schema, ddl) -> bool:
+    """Resolves against the schema and passes the harness's own validity gate (type, grouping and
+    placement errors that PostgreSQL raises before running the query)."""
     try:
         validate_query(sql, schema)
-        return True
     except Exception:
         return False
+    return invalid_reason(sql, ddl) is None
 
 
 def main() -> int:
@@ -79,8 +82,9 @@ def main() -> int:
     schemas, hand = {}, {}
     for sid in sorted({q["schema_id"] for q in queries}):
         ddl = (SCHEMAS_DIR / f"{sid}.sql").read_text()
-        schemas[sid] = (MappingSchema(load_catalog(ddl).sqlglot_schema(), dialect="postgres", normalize=False),
-                        ddl_names(ddl))
+        catalog = load_catalog(ddl)
+        schemas[sid] = (MappingSchema(catalog.sqlglot_schema(), dialect="postgres", normalize=False),
+                        ddl_names(ddl), ddl, list(catalog.enums.values()))
         try:
             hand[sid] = importlib.import_module(f"generator.pairs.{sid}").PAIRS
         except ModuleNotFoundError:
@@ -97,7 +101,7 @@ def main() -> int:
 
     for qi, q in enumerate(queries):
         sid, gt = q["schema_id"], q["sql"]
-        schema, names = schemas[sid]
+        schema, names, ddl, enums = schemas[sid]
         meta = SCHEMA_META[sid]
         num = int(q["id"].rsplit("_", 1)[1])
         rng = random.Random(q["id"])
@@ -115,12 +119,14 @@ def main() -> int:
         for equivalent, pred, note in hand[sid].get(num, []):
             pred = pred.strip()
             expect_invalid = note.startswith("INVALID:")
-            valid = is_valid(pred, schema)
+            valid = is_valid(pred, schema, ddl)
             if (equivalent or not expect_invalid) and not valid:
                 try:
                     validate_query(pred, schema)
+                    reason = invalid_reason(pred, ddl)
                 except Exception as e:
-                    print(f"{q['id']}: hand prediction should be valid but is not: {e}\n    {pred[:160]}")
+                    reason = e
+                print(f"{q['id']}: hand prediction should be valid but is not: {reason}\n    {pred[:160]}")
                 errors += 1
                 continue
             if expect_invalid and valid:
@@ -135,7 +141,7 @@ def main() -> int:
                 emit(q, pred, equivalent, "hand", "invalid_sql" if expect_invalid else "semantic", note)
 
         ctx = {"faithful": roundtrip_faithful(gt), "tree": parse(gt), "quoting": meta["quoting"],
-               "naming": meta["naming"], "ddl_names": names}
+               "naming": meta["naming"], "ddl_names": names, "enums": enums}
 
         # 2. automatic equivalence-preserving rewrites
         eq_names = tiered(EQ_MUTATIONS, rng, COSMETIC_EQ, 1)
@@ -146,7 +152,7 @@ def main() -> int:
             out = EQ_MUTATIONS[name](gt, ctx)
             if not out or not fresh(out):
                 continue
-            if not is_valid(out, schema):
+            if not is_valid(out, schema, ddl):
                 print(f"{q['id']}: eq mutation {name} produced invalid SQL\n    {out[:160]}")
                 errors += 1
                 continue
@@ -167,7 +173,7 @@ def main() -> int:
             out = NEQ_MUTATIONS[name](gt, ctx)
             if not out or pg_ast(out) == gt_ast or not fresh(out):
                 continue
-            valid = is_valid(out, schema)
+            valid = is_valid(out, schema, ddl)
             if (name in EXPECT_INVALID) == valid:
                 continue  # quoting mutation that happened to resolve, or a mutation that broke parsing
             emit(q, out, False, "auto", name, "breaking mutation")
@@ -178,7 +184,7 @@ def main() -> int:
         for k in range(len(MALFORMED_KINDS)):
             kind = MALFORMED_KINDS[(qi + k) % len(MALFORMED_KINDS)]
             out = malformed(gt, kind, first_table)
-            if kind not in ("null", "dml_statement") and (out is None or (out and is_valid(out, schema))):
+            if kind not in ("null", "dml_statement") and (out is None or (out and is_valid(out, schema, ddl))):
                 continue
             emit(q, out, False, "malformed", kind, "not exactly one valid PostgreSQL SELECT")
             break

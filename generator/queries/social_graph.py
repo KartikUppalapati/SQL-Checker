@@ -168,4 +168,15 @@ CROSS JOIN LATERAL (
     LIMIT 3
 ) p""",
      ['lateral', 'top_k']),
+
+    ("Find the top-level posts (not replies) whose body contains a hashtag: a '#' immediately followed by an ASCII letter.",
+     '''SELECT "id" FROM "posts" WHERE "body" ~ '#[A-Za-z]' AND "replyToPostId" IS NULL''',
+     ['regex', 'nullable']),
+
+    ('For each user, show the fraction of users who have at most as many followers as they do (users with no followers count as 0).',
+     '''SELECT u."userName", cume_dist() OVER (ORDER BY COUNT(f."followerId")) AS share
+FROM "users" u
+LEFT JOIN "follows" f ON f."followeeId" = u."id"
+GROUP BY u."id", u."userName"''',
+     ['distribution_window', 'outer_join']),
 ]

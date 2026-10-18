@@ -172,4 +172,16 @@ WHERE email IS NOT NULL""",
        END AS lengthClass
 FROM books""",
      ['case', 'nullable']),
+
+    ('How many loans started in each month of 2024? Include months with no loans, and order by month.',
+     """SELECT m.month::date AS month, COUNT(l.id) AS loans
+FROM generate_series(DATE '2024-01-01', DATE '2024-12-01', INTERVAL '1 month') AS m(month)
+LEFT JOIN loans l ON date_trunc('month', l.loanedOn) = m.month
+GROUP BY m.month
+ORDER BY m.month""",
+     ['gap_fill', 'outer_join']),
+
+    ('Find the members whose email, ignoring surrounding spaces and letter case, is ann@example.com.',
+     """SELECT id, name FROM members WHERE lower(trim(email)) = 'ann@example.com'""",
+     ['string_func', 'nullable']),
 ]

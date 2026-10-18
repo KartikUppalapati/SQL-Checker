@@ -268,7 +268,19 @@ def neq_change_literal(sql, ctx):
             if isinstance(lit, exp.Literal):
                 if lit.is_string:
                     s = lit.this
-                    t = s.swapcase() if s.lower() != s.upper() else s + "x"
+                    types = {tuple(labels) for labels in ctx.get("enums", []) if s in labels}
+                    if len(types) > 1:
+                        continue  # a label of several enum types: no single other label is valid for all
+                    if types:  # an enum label: another label (any other spelling is not a value of the type)
+                        labels = list(types.pop())
+                        if len(labels) < 2:
+                            continue
+                        t = labels[(labels.index(s) + 1) % len(labels)]
+                    elif re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):  # a date: the next day
+                        import datetime
+                        t = (datetime.date.fromisoformat(s) + datetime.timedelta(days=1)).isoformat()
+                    else:
+                        t = s.swapcase() if s.lower() != s.upper() else s + "x"
                     lit.replace(exp.Literal.string(t))
                 else:
                     try:
@@ -310,6 +322,12 @@ def neq_swap_columns(sql, ctx):
         return None
     cols[0], cols[1] = cols[1], cols[0]
     sel.set("expressions", cols)
+    # positions in GROUP BY / ORDER BY follow the columns, so the query stays valid
+    items = [o.this for o in (sel.args["order"].expressions if sel.args.get("order") else [])]
+    items += sel.args["group"].expressions if sel.args.get("group") else []
+    for it in items:
+        if isinstance(it, exp.Literal) and it.is_int and it.this in ("1", "2"):
+            it.replace(exp.Literal.number(3 - int(it.this)))
     return render(tree)
 
 

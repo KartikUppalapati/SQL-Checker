@@ -173,4 +173,15 @@ FROM "Employee"
 WHERE "Status" = 'Active'
 GROUP BY 1""",
      ['case', 'flag_enum']),
+
+    ('List every employee with their department id and the name of the highest-paid employee in that department (the lowest Id wins a salary tie).',
+     '''SELECT "Name", "DepartmentId",
+       first_value("Name") OVER (PARTITION BY "DepartmentId" ORDER BY "Salary" DESC, "Id") AS top_earner
+FROM "Employee"''',
+     ['value_window']),
+
+    ('Split employees into four salary quartiles, quartile 1 being the lowest paid; break salary ties by Id. Show Id, name and quartile.',
+     '''SELECT "Id", "Name", ntile(4) OVER (ORDER BY "Salary", "Id") AS quartile
+FROM "Employee"''',
+     ['distribution_window']),
 ]

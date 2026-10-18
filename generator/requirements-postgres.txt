@@ -1,0 +1,4 @@
+pglast==8.6
+-r requirements.txt
+pgserver==0.1.4
+psycopg2-binary==2.9.13

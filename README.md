@@ -11,12 +11,14 @@ score                   # scoring harness CLI (entry point -> sqleval/cli.py)
 requirements.txt        # harness dependencies: sqlglot, pglast
 sqleval/                # harness implementation
   validate.py           #   syntax gate (PostgreSQL's own parser via pglast)
+  semantic.py           #   errors PostgreSQL raises before running a query (types, placement, names)
   schema.py             #   DDL -> catalog (columns, NOT NULL, PK/UNIQUE, FKs, enum labels)
   canonical.py          #   equivalence-preserving canonicalization
   equivalence.py        #   compare(): gate -> fast path -> canonical comparison -> partial score
   cli.py                #   batch scoring, parallelism, summary report
   eval_dev.py           #   dev tool: list false positives / negatives on a labeled file
 generator/              # programs used to generate the dataset (requirements in generator/requirements.txt)
+  check_postgres.py     #   optional: checks every label against a real PostgreSQL server
 dataset/
   schemas/<id>.sql      # one DDL file per schema
   queries.jsonl         # NL questions + target SQL
@@ -31,19 +33,20 @@ session/                # exported LLM/agent session history
 python3.12 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ./score --schemas dataset/schemas --pairs dataset/pairs.jsonl --output results.jsonl
-python -m unittest discover -s tests                       # boundary tests for each rewrite rule
+python -m unittest discover -s tests                       # rewrite boundary tests + the PostgreSQL-checked gate tests
 python -m sqleval.eval_dev --show fn                       # inspect misclassified labeled pairs
 ```
 
 ## Dataset design
 
-All schemas and queries are PostgreSQL. The dataset has 8 schemas and 197 natural-language
-questions, each with a target SQL query (24–25 questions per schema).
+All schemas and queries are PostgreSQL. The dataset has 9 schemas and 237 natural-language
+questions, each with a target SQL query (22–28 questions per schema).
 
 ### How schemas were varied
 
 Each schema is a deliberate combination of four variation axes. Each axis value appears in at
-least two schemas, so no single convention is tied to a single domain:
+least two schemas, so no single convention is tied to a single domain. The one exception is native
+`BOOLEAN` flags, used only by `rideshare`, the schema added for the column types the others lack:
 
 | schema | shape | naming | quoting | binary flags |
 |---|---|---|---|---|
@@ -55,6 +58,7 @@ least two schemas, so no single convention is tied to a single domain:
 | `library` | M:N (books↔authors, books↔genres) + self-ref (sequels, genre tree) | camelCase | unquoted (folds to lowercase) | `VARCHAR` `'on'/'off'` |
 | `web_analytics` | **star** with two fact tables sharing conformed dimensions | camelCase (`fact`/`dim`) | **quoted** | `SMALLINT` 0/1 |
 | `project_tracker` | M:N (users↔projects, tasks↔labels) + self-ref (subtasks) + self-ref M:N (dependencies) | snake_case | unquoted | `ENUM` (`yes_no`, `task_status`) |
+| `rideshare` | **star** (trips → riders, drivers, vehicles, cities) + self-ref (rider referrals) | snake_case | unquoted | `BOOLEAN`, some nullable |
 
 - **Shape.** Many-to-many junction tables, often with a composite primary key. Self-referential
   foreign keys, which call for self-joins and recursive CTEs. Self-referential many-to-many
@@ -75,9 +79,14 @@ least two schemas, so no single convention is tied to a single domain:
   returned yet" or "not graded yet", optional foreign keys and nullable measures. Queries
   exercise `IS NULL`, `COALESCE`, `COUNT(col)` vs `COUNT(*)`, outer joins, and NULL groups in
   `GROUP BY`.
-- **Binary state.** Two-valued flags are stored three different ways: `SMALLINT` with
-  `CHECK (x IN (0, 1))`, `VARCHAR` with `CHECK (x IN ('on', 'off'))`, and PostgreSQL `ENUM`
-  types.
+- **Binary state.** Two-valued flags are stored four different ways: `SMALLINT` with
+  `CHECK (x IN (0, 1))`, `VARCHAR` with `CHECK (x IN ('on', 'off'))`, PostgreSQL `ENUM` types, and
+  native `BOOLEAN`. Some `BOOLEAN` flags are nullable, so `x IS NOT TRUE`, `NOT x` and
+  `COALESCE(x, false)` differ.
+- **Column types.** Besides integers, `NUMERIC`, text, `DATE` and `TIMESTAMP`, `rideshare` has
+  `TIMESTAMPTZ` instants in cities with their own time zones (so `AT TIME ZONE`, the session time
+  zone and offsets matter), intervals, and `DOUBLE PRECISION` / `REAL` measures (whose sums and
+  rounding are not exact).
 
 ### Queries
 
@@ -86,9 +95,14 @@ least two schemas, so no single convention is tied to a single domain:
 - Derived from the SQL's syntax tree: `join`, `multi_join`, `aggregation`, `having`, `subquery`,
   `cte`, `recursive_cte`, `window`, `set_op`, `order_by`, `limit`, `exists`, `distinct`,
   `null_handling`.
-- Hand-assigned: `self_join`, `m2m`, `anti_join`, `integer_division`, `generic_names`,
-  `nullable`, `flag_int`/`flag_onoff`/`flag_enum`, `distinct_on`, `top_k`, `lateral`,
-  `window_frame`, `string_func`.
+- Hand-assigned: `self_join`, `m2m`, `anti_join`, `outer_join`, `full_join`, `integer_division`,
+  `generic_names`, `nullable`, `three_valued`, `flag_int`/`flag_onoff`/`flag_enum`/`flag_bool`,
+  `distinct_on`, `top_k`, `lateral`, `window_frame`, `value_window` (`first_value`, `last_value`,
+  `nth_value`), `distribution_window` (`ntile`, `cume_dist`, `percent_rank`), `ordered_agg`
+  (`string_agg`/`array_agg … ORDER BY`), `ordered_set_agg` (`percentile_cont`, `mode`),
+  `bool_agg`, `grouping_sets`, `grouping_func`, `gap_fill` (`generate_series`), `values_list`,
+  `string_func`, `concat_null`, `regex`, `greatest_least`, `range`, `dates`, `date_format`,
+  `timestamptz`, `time_zone`, `interval`, `float`.
 - Inherited from the schema: `shape:*`, `naming:*`, `quoting:*`, `flags:*`.
 
 The questions and SQL were written with an LLM agent (see `session/`) as Python data in
@@ -107,21 +121,21 @@ The build fails, and `queries.jsonl` is not written, if any of these checks fail
    identifier folding (sqlglot `qualify`). This catches unquoted references to quoted
    camelCase columns, ambiguous generic columns, and typos.
 
-No database is available at generation time, so the targets are checked statically but have
-not been executed.
+These checks are static. `generator/check_postgres.py` (below) also runs every target and
+prediction on a real PostgreSQL server.
 
 ### Labeled pairs
 
-`dataset/pairs.jsonl` holds 2,530 pairs: 1,205 equivalent and 1,325 not. Each pair uses the
+`dataset/pairs.jsonl` holds 3,193 pairs: 1,508 equivalent and 1,685 not. Each pair uses the
 required fields (`id`, `schema_id`, `ground_truth`, `predicted`, `equivalent`). For analysis,
 each pair also records `query_id`, `source`, `category` and a `note` explaining the label; the
 harness ignores these. Every query in `queries.jsonl` contributes pairs from three sources:
 
 | source | equivalent | not equivalent | what it is |
 |---|---|---|---|
-| `hand` | 420 | 568 | About 5 hand-written predictions per query, each with a one-line reason for its label |
-| `auto` | 785 | 560 | Mutations of the target generated from its syntax tree (`generator/mutations.py`) |
-| `malformed` | 0 | 197 | One malformed prediction per query |
+| `hand` | 563 | 800 | About 6 hand-written predictions per query, each with a one-line reason for its label |
+| `auto` | 945 | 648 | Mutations of the target generated from its syntax tree (`generator/mutations.py`) |
+| `malformed` | 0 | 237 | One malformed prediction per query |
 
 **Hand-written pairs** (`generator/pairs/<schema>.py`) target the cases a string or AST diff
 gets wrong.
@@ -145,6 +159,15 @@ gets wrong.
     counts, `AVG` as `SUM / COUNT` over a NOT NULL column, `RANK` vs `ROW_NUMBER` when the
     ordering is unique, `WITH TIES` with a unique last sort key, `NULLIF` where the target is
     already NULL.
+  - Booleans and three-valued logic: `x = TRUE`, `'yes'`, `IS TRUE` on a NOT NULL flag or in
+    `WHERE`, `IS NULL OR NOT x` as `IS NOT TRUE`, `COALESCE(x, false)`, `every`, `NOT bool_or(NOT x)`.
+  - Time: the same instant at another UTC offset, `AT TIME ZONE 'UTC'` comparisons, `ts::date = d`
+    as a session-local range, `timezone()`/`date()`, `a > b + INTERVAL '30 minutes'`,
+    `INTERVAL '0.5 hours'`, `EXTRACT(EPOCH FROM …)`.
+  - Functions: `CONCAT` of never-NULL arguments as `||`, `trim`/`lower` order, `btrim`,
+    `GREATEST` as a `CASE`, `GROUPING(a, b)` as a bit mask, `nth_value(x, 1)`, `last_value` over the
+    whole partition, `BETWEEN SYMMETRIC`, `NATURAL JOIN`/`USING`, `VALUES` row order, string
+    literals for numbers (`LIMIT '5'`), `CAST(int AS NUMERIC)`.
 - *Near-misses:*
   - `NOT IN` or `<> ALL` over a nullable column (the `ManagerId` trap), a `NULL` inside a `NOT IN`
     list, and `COALESCE(col, 0)` used to dodge the NULL.
@@ -170,6 +193,24 @@ gets wrong.
   - Values a CHECK constraint rules out (`flag <> 0` vs `flag = 1`): CHECK constraints are not
     part of the equivalence definition, so these are labeled not equivalent.
   - Functions from other dialects (`IFNULL`, `NVL`, `ISNULL(a, b)`, `DATEDIFF`), labeled invalid.
+  - Queries that parse but that PostgreSQL rejects, labeled invalid: an output alias in `WHERE`,
+    `HAVING` or the same select list (a MySQL habit); an ungrouped column; an aggregate in
+    `WHERE` or `GROUP BY` (also via `GROUP BY 2`); nested aggregates; a window function in
+    `WHERE`/`HAVING` or without `OVER`; a non-boolean condition (`WHERE is_active` on a
+    `SMALLINT`); type mismatches (`varchar = integer`, `date >= 2020`, `COALESCE(email, 0)`,
+    `interval > 30`); `SUM`/`AVG` of text or booleans, `MIN`/`MAX` of booleans, `string_agg` of
+    an integer, `round(double precision, 1)`; literals a type cannot read (`'2020.0'` for an
+    integer, a misspelt enum label); `LIKE` on an enum; `UNION` column count or type mismatches;
+    a subquery with too many columns; `DISTINCT ON` not leading the `ORDER BY`; an `ORDER BY`
+    position past the select list; a derived table that needs `LATERAL`; a table referred to by
+    name after it was aliased; ambiguous columns.
+  - Traps from the new functions: `last_value` with the default frame, `DENSE_RANK` vs `RANK`,
+    `ntile` vs `ceil(4.0 * row_number / n)`, `percent_rank` vs `cume_dist`, `CONCAT` vs `||` with
+    NULLs, `string_agg` without `ORDER BY`, `array_agg` keeping NULLs, `mode()` tie order,
+    `percentile_disc` vs `_cont`, `generate_series` gap-filling with `COUNT(*)`, `FULL JOIN` vs
+    `LEFT JOIN`, `OFFSET`, `GREATEST` written as a `CASE` that lets NULL through, `floor` vs
+    integer division on negatives, `[[:alpha:]]` vs `[A-Za-z]`, `SUM` over an empty table vs
+    `COUNT`, the session time zone vs a fixed offset, an exact `NUMERIC` sum of a float column.
 
 **Automatic pairs** are chosen per query with an RNG seeded by the query id, so the build is
 deterministic.
@@ -179,8 +220,9 @@ deterministic.
     rewritten as implicit comma joins, `COUNT(1)`, and `ORDER BY 1` added when the target has
     no ordering.
 - *Breaking mutations:*
-  - Flip a comparison against a literal, change a literal, drop a literal filter.
-  - Swap or drop output columns.
+  - Flip a comparison against a literal, change a literal (another label of an enum, the next
+    day of a date), drop a literal filter.
+  - Swap or drop output columns (positions in `GROUP BY`/`ORDER BY` follow a swap).
   - Drop `DISTINCT`, swap `SUM`↔`AVG` or `MIN`↔`MAX`, change `LEFT` to `INNER` join.
   - Flip `IS [NOT] NULL`, turn `100.0` into `100` (integer division), flip or drop
     `ORDER BY`, change `LIMIT`.
@@ -200,14 +242,39 @@ python -m generator.build_pairs     # after build_queries
 ```
 
 The build refuses to write the file if any of these fail:
-- Every prediction labeled equivalent parses and resolves against the schema.
-- Hand-written negatives are valid SQL unless the note marks them `INVALID:`, and those must
-  actually fail.
+- Every prediction labeled equivalent parses, resolves against the schema and passes the
+  harness's validity gate.
+- Hand-written negatives pass the gate unless the note marks them `INVALID:`, and those must
+  fail it.
 - Cosmetic rewrites leave the PostgreSQL parse tree unchanged.
 - Breaking mutations change the parse tree.
 - No pair is duplicated.
 
-A harness that always answers "not equivalent" scores 52.4% on this set.
+A harness that always answers "not equivalent" scores 52.8% on this set.
+
+### Checked against PostgreSQL
+
+The harness never runs SQL, but the dataset's labels were checked on PostgreSQL 16.2 by
+`generator/check_postgres.py` (an embedded server from the `pgserver` package):
+
+```bash
+pip install -r generator/requirements-postgres.txt
+python -m generator.check_postgres --seeds 40
+```
+
+- **Validity.** Every target and prediction is planned with `EXPLAIN`. PostgreSQL rejects exactly
+  the predictions labeled invalid (0 disagreements in 3,193 pairs).
+- **Results.** Each schema is filled with random data 40 times. The data respects types, keys,
+  NOT NULL and foreign keys, with CHECK constraints dropped as in the equivalence definition, and
+  each fill uses a different session time zone. Every pair labeled equivalent returns the same
+  multiset of rows as its target on all 40 databases. Most pairs labeled not equivalent (1,078 of
+  1,234 runnable ones) differ on at least one. The rest need data that random rows rarely produce,
+  such as a tie, a `#` in a post body or a negative duration.
+
+This audit found and fixed six hand-written labels: queries PostgreSQL rejects that were labeled
+as valid non-equivalents. It also found two automatic mutations that produced invalid SQL:
+`change_literal` misspelt enum labels, and `swap_columns` left `GROUP BY 1` pointing at an
+aggregate. `tests/test_gate.py` keeps 215 queries whose verdict comes from PostgreSQL.
 
 ## How scoring works
 
@@ -228,18 +295,46 @@ For each pair (`sqleval/equivalence.py`):
    `match: false, score: 0`.
 2. **Name resolution against the schema.** sqlglot `qualify` resolves every table and column under
    PostgreSQL identifier rules: unquoted names fold to lowercase, quoted names are case-sensitive.
-   The prediction is also rejected for:
-   - unknown tables or columns, or ambiguous columns;
-   - an enum literal that is not a label of its type (a runtime error in PostgreSQL);
-   - selecting a column that is neither grouped nor covered by a grouped primary key (UNIQUE
-     columns don't count, matching PostgreSQL);
-   - `SELECT DISTINCT … ORDER BY` an expression that is not in the select list.
+   The prediction is also rejected for the errors PostgreSQL raises before it runs a query
+   (`sqleval/semantic.py`, `_check_grouping`). Each check is lenient where it is unsure: it rejects
+   only what PostgreSQL certainly rejects, and `tests/test_gate.py` holds it to PostgreSQL's own
+   verdicts.
+   - *Names:* unknown tables or columns, ambiguous columns, a table referred to by its name after
+     it was aliased, duplicate aliases, a derived table that reads a sibling without `LATERAL`, a
+     `USING` column missing on one side, and output aliases where PostgreSQL does not see them
+     (`WHERE`, `HAVING`, `ON`, the same select list, inside an `ORDER BY`/`GROUP BY` expression).
+     These run before sqlglot's `qualify`, which would silently expand an alias in `WHERE`.
+   - *Grouping and placement:* a column neither grouped nor covered by a grouped primary key
+     (UNIQUE keys don't count), also when read by a subquery; aggregates in `WHERE`, `ON` or
+     `GROUP BY`; nested aggregates; window functions in `WHERE`, `HAVING`, `GROUP BY`, inside an
+     aggregate or another window, or ranking/value functions without `OVER`.
+   - *Shape:* `UNION`/`INTERSECT`/`EXCEPT` branches with different column counts, an `ORDER BY`
+     on a set operation that is not an output column, `ORDER BY`/`GROUP BY` positions past the
+     select list, `IN`/scalar subqueries with the wrong number of columns, `DISTINCT ON` that does
+     not lead the `ORDER BY`, `SELECT DISTINCT … ORDER BY` something not selected, a column in
+     `LIMIT`.
+   - *Types* (inferred from the catalog: numeric, string, date/time, interval, boolean, each enum):
+     operands no operator accepts (`varchar = integer`, `date > 2020`, `interval > 30`,
+     `boolean = 1`); a non-boolean `WHERE`/`ON`/`HAVING`/`CASE WHEN`/`AND`/`NOT` operand;
+     arithmetic on text, booleans or enums, `date + date`; `LIKE` on a number, date or enum;
+     `CASE`/`COALESCE`/`UNION`/`IN` branches whose types cannot be matched; `SUM`/`AVG` of text,
+     booleans, enums or dates; `MIN`/`MAX` of booleans; `bool_and` of a non-boolean;
+     `string_agg` of a number; `round`/`trunc(double precision, n)`; and a string literal its
+     type cannot read (`'2020.0'` for an integer, `'2024-13-01'`, `'maybe'` for a boolean, a
+     label that is not in the enum).
+   Before any of this, the PostgreSQL syntax that sqlglot misreads is handled. `BETWEEN SYMMETRIC`
+   would otherwise be read as `BETWEEN <a column named symmetric>`. `IS [NOT] UNKNOWN` doesn't
+   parse at all. `NATURAL JOIN` would become a join with no condition, matching a cross join.
+   And `INTERVAL '0.5 hours'` would become `'5 hours'`, and `'-1 day'` would lose its sign, since
+   sqlglot splits interval strings with an unanchored regex. The PostgreSQL aggregates that
+   sqlglot parses as plain functions (`mode`, `every`, ...) are marked as aggregates.
 3. **Fast path.** If the two parse trees are identical once source positions are ignored, the
    queries match.
 4. **Canonicalization** (`sqleval/canonical.py`). Each rewrite below states the condition that
    makes it sound:
    - *Names and structure:* parentheses, `FETCH FIRST`/`LIMIT` (`WITH TIES` is kept distinct),
-     positional and alias references in `GROUP BY`/`ORDER BY`, `*` expansion, `USING` → `ON`. CTEs become derived tables (when read
+     positional and alias references in `GROUP BY`/`ORDER BY`, `*` expansion, `NATURAL JOIN` →
+     `USING (<shared columns>)` → `ON`. CTEs become derived tables (when read
      more than once, only if deterministic: no `random()`, `nextval`, ...). Aliases are made
      globally unique. Derived-table columns nothing reads are dropped (not under `DISTINCT`), and
      the rest are sorted and renamed by position (only their names are read). `OVER w` is replaced
@@ -325,6 +420,23 @@ For each pair (`sqleval/equivalence.py`):
        (or counts: no overflow). `LAG`/`LEAD` drop a default offset of 1; ranking functions drop
        their frame. Numeric literals in comparisons are respelled (`1e4` = `10000`).
      - `x LIKE '%'` is `x IS NOT NULL` in WHERE / HAVING / ON conditions.
+     - Booleans: `x = TRUE` is x and `x = FALSE` is `NOT x` (the same NULL); `IS [NOT] DISTINCT FROM
+       TRUE` is `IS [NOT] TRUE`; `COALESCE(x, FALSE)` is `x IS TRUE`; `x IS NULL OR NOT x` is
+       `x IS NOT TRUE` (and the `IS NOT NULL AND` duals); `IS TRUE`/`IS FALSE` on a never-NULL x is
+       x / `NOT x`; in WHERE / HAVING / ON and `CASE WHEN` (through AND/OR) `x IS TRUE` is x;
+       `CASE WHEN NOT c THEN a ELSE b END` swaps when c is never NULL; `NOT (a OR b)` is
+       `NOT a AND NOT b`; `every` is `bool_and`; `NOT bool_or(NOT x)` is `bool_and(x)`; a never-NULL
+       boolean cast to `int` is `CASE WHEN x THEN 1 ELSE 0 END`.
+     - Strings and functions: `CONCAT` of never-NULL arguments is `||`; `btrim(x)` is `trim(x)`, and
+       trimming spaces commutes with `lower`/`upper`; `GROUPING(a, b, …)` is the bit mask
+       `2^(n-1) * GROUPING(a) + …`; `GREATEST`/`LEAST` arguments are a set, `COALESCE(x, y)` next
+       to y inside them is x, and `CASE WHEN x > c THEN x ELSE c END` (c never NULL) is
+       `GREATEST(x, c)`; the rows of a `VALUES` list in FROM are a bag; an unquoted function name
+       folds to lowercase.
+     - Value windows: `nth_value(x, 1)` is `first_value(x)`; `first_value` over any frame from
+       `UNBOUNDED PRECEDING` to the current row or later is the default frame; `last_value` over a
+       frame ending at `UNBOUNDED FOLLOWING` is `first_value` in the reversed order when that order
+       includes a key of the window's only table.
      - `SUM(x) / COUNT(x)` (`::numeric` first for integers; `COUNT(*)` when x is never NULL;
        `NULLIF(count, 0)` allowed) is `AVG(x)`. `X / NULLIF(C, 0)` is `X / C` when C counts the input's
        rows and X is strict in a SUM / AVG / MIN / MAX of it (or the SELECT has a plain `GROUP BY`).
@@ -337,13 +449,29 @@ For each pair (`sqleval/equivalence.py`):
        column with numeric literals is rebuilt from the step function it computes (branch order and
        spelling no longer matter).
    - *Type-aware literals:*
-     - An untyped string compared with a DATE or TIMESTAMP column takes the column's type.
+     - An untyped string compared with a DATE or TIMESTAMP column takes the column's type; next to a
+       numeric column it is that number (`= '5'`, `IN ('1')`, `COALESCE(x, '0')`, `LIMIT '5'`); next
+       to a boolean column it is that boolean (`'t'`, `'yes'`, `'off'`). `CAST(<integer> AS NUMERIC)`
+       compared with a number is the integer. `BETWEEN SYMMETRIC` with literal bounds is `BETWEEN`
+       the smaller and the larger; otherwise it is PostgreSQL's `OR` of both orders.
+     - `TIMESTAMPTZ` literals become instants: a literal with an offset (`+02`, `Z`) is the UTC
+       instant; one without, a `TIMESTAMP` or a `DATE` is the session-local time (a date at
+       midnight), so `'2024-03-01'`, `TIMESTAMPTZ '2024-03-01'` and `DATE '2024-03-01'` agree and
+       `'2024-03-01 00:00+00'` does not. `ts::date` compared with a date is the local-midnight
+       range. `ts AT TIME ZONE 'UTC'` compared with a timestamp literal is ts compared with that UTC
+       instant. `timezone(z, ts)` is `ts AT TIME ZONE z`, `date(x)` is `x::date`.
+     - Intervals: compared with a timestamp difference, an interval literal of seconds…weeks is its
+       length (`'0.5 hours'` = `'30 minutes'`; comparison counts a day as 24 hours); `a op b + c`
+       (c a time-only interval, no days) is `a - b op c`; `EXTRACT(EPOCH FROM a - b) op n` is
+       `a - b op INTERVAL 'n seconds'`. Day and month intervals are kept as written: added to a
+       `TIMESTAMPTZ` they follow the calendar across daylight-saving changes.
      - Bounds over discrete types are tightened: `x <= 5` → `x < 6` for integers, by one day
        for DATE and one microsecond for TIMESTAMP.
      - `EXTRACT(YEAR FROM d) = y` becomes a date range.
      - Enum comparisons are checked against the type's labels, and `<> 'No'` on a two-label enum
-       becomes `= 'Yes'`. `<` / `<=` against a label use the declaration order (an `IN` list), and
-       `enum::text LIKE / ILIKE / = 'pattern'` is the set of labels it matches.
+       becomes `= 'Yes'`. `<` / `<=` against a label use the declaration order (an `IN` list),
+       `enum::text LIKE / ILIKE / = 'pattern'` is the set of labels it matches, and `enum::text`
+       `<>` or `IN` labels is the enum test.
      - Integer-valued aggregates (`COUNT`, `SUM`/`MIN`/`MAX` of integers) get discrete bounds
        (`COUNT(*) >= 4` is `COUNT(*) > 3`).
      - Date arithmetic on literals is folded (`DATE '2024-01-31' + INTERVAL '1 month'` →
@@ -418,23 +546,31 @@ For each pair (`sqleval/equivalence.py`):
    of the canonical tokens (tables, columns, operators, literals). Invalid predictions score 0,
    and matches score 1.0.
 
-**Results on `dataset/pairs.jsonl`:** accuracy 99.6%, precision 100% (0 false positives), recall
-99.1% (11 false negatives, all hand-written semantic equivalences). Automatic and malformed
-pairs are all scored correctly; hand-written pairs 98.9%.
+**Results on `dataset/pairs.jsonl`:** accuracy 99.1%, precision 100% (0 false positives), recall
+98.0% (30 false negatives, all hand-written semantic equivalences). Automatic and malformed
+pairs are all scored correctly; hand-written pairs 97.8%.
 
 **Soundness checks:**
 - `tests/test_equivalence.py` places a "precondition holds" pair next to a "precondition fails"
   look-alike for every rule. Writing these tests found and fixed two real false positives:
   aggregate-ownership bugs where an aggregate inside a subquery was attributed to the outer query.
-- A stress run applying every breaking mutation to every target query (677 mutations) matched only
+- A stress run applying every breaking mutation to every target query (767 mutations) matched only
   one, which is in fact equivalent (an output alias unquoted). Every hand and automatic prediction
-  compared against every other target of its schema (55,156 comparisons) matched only predictions
+  compared against every other target of its schema (75,257 comparisons) matched only predictions
   that really do equal that other target (3, `org_chart_001`/`002`).
+- Covering the missing SQL features exposed four false positives in code that predated them,
+  all fixed, each with a regression test:
+  - sqlglot read `NATURAL JOIN` as a cross join.
+  - `INTERVAL '0.5 hours'` parsed as five hours, and `'-1 day'` as one day.
+  - `qualify` expanded an output alias used in `WHERE`/`HAVING`, so the invalid
+    `HAVING c > 1` matched `HAVING COUNT(*) > 1`.
+  - Type errors inside an `EXISTS` select list were thrown away with that list.
+- The labels themselves were checked on PostgreSQL (above).
 - Inlining named windows closed a false positive: the serializer ignored the `WINDOW` clause, so
   `RANK() OVER w` matched whatever `w` was defined as.
 
 **Performance and determinism:**
-- The 2,530 dataset pairs take 1.7s on 10 workers (about 1,470 pairs/s; about 310 pairs/s on one).
+- The 3,193 dataset pairs take 2.2s on 10 workers (about 1,450 pairs/s; about 285 pairs/s on one).
 - Ground-truth analysis is cached and shared across pairs.
 - The code has no randomness, clocks, network access or execution. Output is byte-identical with
   any number of workers.
@@ -442,7 +578,7 @@ pairs are all scored correctly; hand-written pairs 98.9%.
 ## Known limitations
 
 - **One-sided by design.** Equivalences that need reasoning beyond the implemented rewrites are
-  reported as non-matches. The 11 remaining false negatives:
+  reported as non-matches. Of the 30 remaining false negatives, 11 predate the new features:
   - recursive CTEs seeded differently (3) and `WITH TIES` with a unique last sort key (1);
   - distributing a division (`Q*P*(1 - C/100)` vs. `Q*P*C/100`): NUMERIC division rounds to a
     scale that depends on the dividend's magnitude, so the two can differ for very large values;
@@ -452,20 +588,40 @@ pairs are all scored correctly; hand-written pairs 98.9%.
     includes the outer table (2); a correlated sum over a date range vs. a `RANGE INTERVAL` window;
     `LEAST`/`GREATEST` pairing vs. an ordered self-join; and an average of per-post counts vs. a
     ratio of table counts (needs the counts summed through a foreign key).
+
+  The other 19 are one-off idioms for the newer features:
+  - **Strings and regex:** `array_to_string(array_agg(…))`, `format('%s …')`, the two
+    `CASE` branches of a `COALESCE` written out, `SIMILAR TO` and `~*` vs. `~`.
+  - **Rewritten logic:** a correlated top-1 lookup vs. `first_value`, a half-open month range
+    vs. `date_trunc`, `to_char(date_trunc(…))`, `(x - x % 1000) / 1000`, and `GROUPING(x)` written
+    as `(x IS NULL)::int`.
+  - **Aggregates and joins:** conditional aggregation vs. a `FULL JOIN` of two aggregates, a
+    `DISTINCT ON` mode vs. `mode()`, a `VALUES` join vs. a `CASE` lookup, `MIN`/`MAX(x::int)` and
+    filtered counts as `bool_and`/`bool_or`, a correlated previous-row lookup vs. `LAG`, and an
+    `IN (… MAX …)` latest row vs. `DISTINCT ON`.
 - **CHECK constraints are ignored.** The task defines validity by types, keys, NOT NULL and
   foreign keys, so `flag <> 0` is not treated as equal to `flag = 1`. Enum types are used.
 - **Numeric display scale is not modelled.** Results are compared by value semantics. Rewrites
   that could change the numeric result (re-association, distributing division) are not performed.
-- **Validity is approximated.** Syntax is checked exactly by PostgreSQL's parser. Name
-  resolution, enum labels and grouping rules are checked statically. Type errors (comparing an
-  integer to a non-numeric string) and runtime errors (division by zero, a scalar subquery
-  returning several rows) are not detected.
+- **Validity is approximated.** Syntax is checked exactly by PostgreSQL's parser. Names,
+  grouping, placement, shapes and the type errors listed above are checked statically and leniently.
+  Not detected: calls to functions that do not exist or with the wrong arguments (beyond the listed
+  ones), type errors involving expressions whose type is not inferred (function results, array
+  elements), and runtime errors (division by zero, a scalar subquery returning several rows,
+  `LIMIT -1`, an unknown time-zone name).
+- **Session settings.** Equivalence must hold under any session time zone (the PostgreSQL check runs
+  each database under a different one), so the session-local and fixed-offset readings of a
+  timestamp are different. Other settings (`DateStyle`, locale and collation) are assumed to be the
+  defaults.
+- **Floating point.** Rewrites that would change float arithmetic (re-association,
+  `SUM(x::numeric)`, `AVG` vs. `SUM/COUNT` of a `REAL`) are not performed. Like PostgreSQL itself,
+  the harness does not fix the order in which a float `SUM` adds its rows.
 - **Ties under `ORDER BY … LIMIT`.** Two queries with the same `ORDER BY` and `LIMIT` are
   treated as equal even when ties make both nondeterministic. The same goes for
   `ROW_NUMBER() = 1` / `<= n`, `DISTINCT ON` and `LATERAL … LIMIT n` with the same ordering. A
   prediction that adds a tie-breaker is reported as different.
-- **sqlglot coverage.** If sqlglot can't parse a construct PostgreSQL accepts (e.g.
-  `BETWEEN SYMMETRIC`), the pair falls back to parse-tree identity and is reported as
-  `unsupported`, not invalid.
+- **sqlglot coverage.** If sqlglot can't parse a construct PostgreSQL accepts (`GROUPS` window
+  frames, a frame `EXCLUDE` clause, `BETWEEN SYMMETRIC` mixed with a plain `BETWEEN` in one
+  query), the pair falls back to parse-tree identity and is reported as `unsupported`, not invalid.
 - **Unknown `schema_id`.** Without a schema the harness still parses and normalizes, but it skips
   every constraint-dependent rewrite and the column-existence checks.

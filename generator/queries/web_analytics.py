@@ -179,4 +179,19 @@ FROM "factOrder" o
 JOIN "dimDate" d ON d."dateKey" = o."dateKey"
 ORDER BY o."visitorKey", d."calendarDate", o."orderId"''',
      ['distinct_on']),
+
+    ('How many page views were there for each number of whole seconds of duration (the duration in milliseconds divided by 1000, truncated)? Only views with a measured duration.',
+     '''SELECT "durationMs" / 1000 AS seconds, COUNT(*) AS views
+FROM "factPageView"
+WHERE "durationMs" IS NOT NULL
+GROUP BY "durationMs" / 1000''',
+     ['integer_division', 'nullable']),
+
+    ('How many orders have between 3 and 10 items, inclusive?',
+     '''SELECT COUNT(*) FROM "factOrder" WHERE "itemCount" BETWEEN 3 AND 10''',
+     ['range']),
+
+    ('For each campaign, show its name and the later of its end date and 2024-12-31; a campaign with no end date shows 2024-12-31.',
+     '''SELECT "name", GREATEST("endDate", DATE '2024-12-31') AS until FROM "dimCampaign"''',
+     ['greatest_least', 'nullable']),
 ]

@@ -204,4 +204,24 @@ CROSS JOIN LATERAL (
     LIMIT 3
 ) t""",
      ['lateral', 'top_k', 'star']),
+
+    ('What is the most common quantity per sale in each product category? If several quantities are equally common, take the smallest.',
+     """SELECT p.category, mode() WITHIN GROUP (ORDER BY f.quantity) AS common_qty
+FROM fact_sales f
+JOIN dim_product p ON p.product_key = f.product_key
+GROUP BY p.category""",
+     ['ordered_set_agg']),
+
+    ("Compare each product's units sold in 2023 and in 2024, including products that sold in only one of the two years (show 0 for the other year).",
+     """SELECT COALESCE(a.product_key, b.product_key) AS product_key,
+       COALESCE(a.units, 0) AS units_2023,
+       COALESCE(b.units, 0) AS units_2024
+FROM (SELECT f.product_key, SUM(f.quantity) AS units
+      FROM fact_sales f JOIN dim_date d ON d.date_key = f.date_key
+      WHERE d.year = 2023 GROUP BY f.product_key) a
+FULL JOIN (SELECT f.product_key, SUM(f.quantity) AS units
+           FROM fact_sales f JOIN dim_date d ON d.date_key = f.date_key
+           WHERE d.year = 2024 GROUP BY f.product_key) b
+  ON b.product_key = a.product_key""",
+     ['full_join', 'outer_join', 'subquery']),
 ]

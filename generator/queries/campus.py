@@ -180,4 +180,26 @@ GROUP BY s.id, s.name""",
 FROM instructors i
 ORDER BY i.department_id, i.salary DESC NULLS LAST, i.id""",
      ['distinct_on', 'nullable']),
+
+    ("For each course that has instructors, list the instructors' names in alphabetical order as one comma-separated string. Show the course code.",
+     """SELECT c.code, string_agg(i.name, ', ' ORDER BY i.name) AS instructors
+FROM courses c
+JOIN course_instructors ci ON ci.course_id = c.id
+JOIN instructors i ON i.id = ci.instructor_id
+GROUP BY c.id, c.code""",
+     ['m2m', 'ordered_agg']),
+
+    ('What is the median grade in each department, over the graded enrollments in its courses?',
+     """SELECT d.name, percentile_cont(0.5) WITHIN GROUP (ORDER BY e.grade) AS median_grade
+FROM enrollments e
+JOIN courses c ON c.id = e.course_id
+JOIN departments d ON d.id = c.department_id
+WHERE e.grade IS NOT NULL
+GROUP BY d.id, d.name""",
+     ['ordered_set_agg', 'nullable']),
+
+    ("Show each student's name followed by their email in angle brackets, or '<no email>' when they have none (for example 'Ann <ann@x.edu>').",
+     """SELECT name || ' <' || COALESCE(email, 'no email') || '>' AS contact
+FROM students""",
+     ['string_func', 'nullable', 'concat_null']),
 ]

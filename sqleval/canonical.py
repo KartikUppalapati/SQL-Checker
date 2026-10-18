@@ -26,7 +26,12 @@ from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
 from sqlglot.optimizer.qualify import qualify
 from sqlglot.schema import MappingSchema
 
+from . import semantic
 from .schema import Catalog
+
+# sqlglot splits INTERVAL '<n> <unit>' with an unanchored findall, so '0.5 hours' became '5 hours' and
+# '-1 day' lost its sign. Split only a whole '<integer> <unit>' string; anything else stays a literal.
+exp.INTERVAL_STRING_RE = re.compile(r"^\s*([0-9]+)\s*([a-zA-Z]+)\s*$")
 from .validate import Invalid
 
 
@@ -242,6 +247,9 @@ def _pg_columns_exist(sql, ctx) -> bool:
                     names.add(fields[-1]["String"]["sval"])
             if "ResTarget" in o and o["ResTarget"].get("name"):
                 aliases.add(o["ResTarget"]["name"])
+            if isinstance(o.get("alias"), dict):  # FROM-item aliases and column lists (a function's output, a whole row)
+                aliases.add(o["alias"].get("aliasname"))
+                aliases.update(c.get("String", {}).get("sval") for c in o["alias"].get("colnames", []))
             for v in o.values():
                 walk(v)
         elif isinstance(o, list):
@@ -275,13 +283,129 @@ def _expand_grouping_set_ordinals(tree):
                     lit.replace(_unalias(sel.expressions[pos - 1]).copy())
 
 
+def _between_kinds(sql):
+    """The kinds of BETWEEN in the query, as PostgreSQL's parser sees them."""
+    import json
+    from pglast.parser import parse_sql_json
+    try:
+        text = parse_sql_json(sql)
+    except Exception:
+        return set()
+    return {m[1] for m in re.findall(r'"kind":\s*"AEXPR_(NOT_)?(BETWEEN(?:_SYM)?)"', text)}
+
+
+def _rewrite_is_unknown(sql):
+    """sqlglot cannot parse `x IS [NOT] UNKNOWN`, which for a boolean is `x IS [NOT] NULL`."""
+    import json
+    from pglast.parser import parse_sql_json
+    try:
+        text = parse_sql_json(sql)
+    except Exception:
+        return sql
+    if '"IS_UNKNOWN"' not in text and '"IS_NOT_UNKNOWN"' not in text:
+        return sql
+    tokens = sqlglot.Dialect.get_or_raise("postgres").tokenize(sql)
+    for i in range(len(tokens) - 1, 0, -1):
+        t = tokens[i]
+        prev = tokens[i - 1] if tokens[i - 1].token_type != sqlglot.tokens.TokenType.NOT else tokens[i - 2]
+        if t.text.upper() == "UNKNOWN" and prev.token_type == sqlglot.tokens.TokenType.IS:
+            sql = sql[:t.start] + "NULL" + sql[t.end + 1:]
+    return sql
+
+
+def _parse_between_symmetric(sql):
+    """sqlglot reads `BETWEEN SYMMETRIC x AND y` as BETWEEN a column named symmetric. PostgreSQL
+    defines it as (a >= x AND a <= y) OR (a >= y AND a <= x): drop the keyword and expand. Only when
+    every BETWEEN in the query is symmetric, so the expanded nodes are known."""
+    kinds = _between_kinds(sql)
+    if "BETWEEN_SYM" not in kinds:
+        return None
+    if "BETWEEN" in kinds:
+        raise Unsupported("mixed BETWEEN SYMMETRIC")
+    tokens = sqlglot.Dialect.get_or_raise("postgres").tokenize(sql)
+    cut = [t for prev, t in zip(tokens, tokens[1:])
+           if prev.token_type == sqlglot.tokens.TokenType.BETWEEN and t.text.lower() == "symmetric"]
+    for t in reversed(cut):
+        sql = sql[:t.start] + sql[t.end + 1:]
+    tree = sqlglot.parse_one(sql, read="postgres")
+
+    def expand(n):
+        if not isinstance(n, exp.Between):
+            return n
+        a, lo, hi = n.this, n.args["low"], n.args["high"]
+        lv, hv = _num_value(lo), _num_value(hi)
+        if lv is not None and hv is not None:
+            return exp.Between(this=a, low=(lo if lv <= hv else hi).copy(), high=(hi if lv <= hv else lo).copy())
+        fwd = exp.And(this=exp.GTE(this=a.copy(), expression=lo.copy()), expression=exp.LTE(this=a.copy(), expression=hi.copy()))
+        rev = exp.And(this=exp.GTE(this=a.copy(), expression=hi.copy()), expression=exp.LTE(this=a.copy(), expression=lo.copy()))
+        return exp.Paren(this=exp.Or(this=exp.Paren(this=fwd), expression=exp.Paren(this=rev)))
+    return tree.transform(expand)
+
+
+def _natural_to_using(tree, ctx):
+    """NATURAL JOIN is JOIN ... USING (the column names both sides have), or a cross join when they
+    share none. sqlglot reads it as a join without a condition, so it is resolved here or refused."""
+    for sel in tree.find_all(exp.Select):
+        joins = sel.args.get("joins") or []
+        for i, j in enumerate(joins):
+            if (j.args.get("method") or "").upper() != "NATURAL":
+                continue
+            frm = sel.args.get("from")
+            left_nodes = [frm.this] + [jj.this for jj in joins[:i]] if frm is not None else None
+            left = [semantic._source_columns(n, ctx) for n in left_nodes] if left_nodes else None
+            right = semantic._source_columns(j.this, ctx)
+            if right is None or left is None or any(c is None for c in left):
+                raise Unsupported("NATURAL JOIN over unknown columns")
+            common = [c for c in dict.fromkeys(x for cols in left for x in cols) if c in right]
+            if any(sum(c in cols for cols in left) > 1 for c in common):
+                raise Invalid("ambiguous_natural_join")  # common column name appears more than once
+            j.set("method", None)
+            if common:
+                j.set("using", [exp.to_identifier(c, quoted=True) for c in common])
+            elif (j.args.get("side") or "").upper() in ("LEFT", "RIGHT", "FULL"):
+                j.set("on", exp.true())
+            else:
+                j.set("kind", "CROSS")
+
+
+# PostgreSQL aggregates that sqlglot parses as plain function calls
+_PG_AGGREGATES = {"mode", "every", "json_agg", "jsonb_agg", "json_object_agg", "jsonb_object_agg", "xmlagg",
+                  "bit_and", "bit_or", "bit_xor", "range_agg", "range_intersect_agg", "regr_avgx", "regr_avgy",
+                  "regr_count", "regr_intercept", "regr_r2", "regr_slope", "regr_sxx", "regr_sxy", "regr_syy",
+                  "covar_pop", "covar_samp", "var_pop", "var_samp", "stddev_pop", "stddev_samp"}
+_HYPOTHETICAL = {"rank", "dense_rank", "percent_rank", "cume_dist"}
+
+
+def _mark_aggregates(tree):
+    """Make those aggregates AggFunc nodes, so every aggregate-aware rule and check sees them
+    (rank() WITHIN GROUP (...) is the hypothetical-set aggregate, not the window function)."""
+    def tf(n):
+        if isinstance(n, exp.Anonymous):
+            name = str(n.this).lower()
+            if name == "every" and len(n.expressions) == 1:
+                return exp.LogicalAnd(this=n.expressions[0].copy())  # the SQL-standard bool_and
+            if name in _PG_AGGREGATES or name in _HYPOTHETICAL and isinstance(n.parent, exp.WithinGroup):
+                return exp.AnonymousAggFunc(this=name, expressions=[e.copy() for e in n.expressions])
+        return n
+    return tree.transform(tf)
+
+
+def parse_postgres(sql: str) -> exp.Expression:
+    """sqlglot's parse, with the PostgreSQL syntax it misreads or rejects handled first."""
+    sql = _rewrite_is_unknown(sql)
+    return _parse_between_symmetric(sql) or sqlglot.parse_one(sql, read="postgres")
+
+
 def parse_and_qualify(sql: str, ctx: Context) -> exp.Expression:
     try:
-        tree = sqlglot.parse_one(sql, read="postgres")
+        tree = parse_postgres(sql)
+    except Unsupported:
+        raise
     except Exception as e:
         raise Unsupported(f"sqlglot_parse: {e}")
     if tree is None:
         raise Unsupported("sqlglot_parse: empty")
+    tree = _mark_aggregates(tree)
     _expand_grouping_set_ordinals(tree)
     if ctx.catalog is None:
         try:
@@ -290,6 +414,8 @@ def parse_and_qualify(sql: str, ctx: Context) -> exp.Expression:
             raise Unsupported(f"qualify: {e}")
     tree = normalize_identifiers(tree, dialect="postgres")
     _check_tables(tree, ctx)
+    _natural_to_using(tree, ctx)
+    semantic.check_names(tree, ctx)
     try:
         tree = qualify(tree, schema=ctx.schema, dialect="postgres", validate_qualify_columns=True,
                        quote_identifiers=True)
@@ -303,6 +429,7 @@ def parse_and_qualify(sql: str, ctx: Context) -> exp.Expression:
         raise Unsupported(f"qualify: {msg}")
     except Exception as e:
         raise Unsupported(f"qualify: {e}")
+    semantic.check_types(tree, ctx)
     _check_grouping(tree, ctx)
     return tree
 
@@ -401,9 +528,17 @@ def _check_grouping(tree, ctx):
                     exp.column(k, table=alias, quoted=True).sql() in common for k in ctx.table(node.name).primary_key):
                 pk_grouped.add(alias)
 
+        own = {a for a, _, _ in _sources(sel)}
+
         def ok(e):
             # lenient where unsure: never reject what PostgreSQL would accept
-            if e.sql() in gset or isinstance(e, (exp.AggFunc, exp.Filter, exp.Window, exp.Subquery,
+            if isinstance(e, exp.Subquery):
+                # a subquery may read only grouped columns of this query (outside its own aggregates)
+                inner = {a for s in e.find_all(exp.Select) for a, _, _ in _sources(s)}
+                return all(c.table not in own or c.table in inner or c.sql() in gset or c.table in pk_grouped
+                           or any(isinstance(a, exp.AggFunc) for a in _ancestors(c, e))
+                           for c in e.find_all(exp.Column))
+            if e.sql() in gset or isinstance(e, (exp.AggFunc, exp.Filter, exp.Window, exp.WithinGroup,
                                                  exp.Literal, exp.Star)):
                 return True
             if isinstance(e, exp.Column):
@@ -1270,6 +1405,11 @@ def _normalize_clauses(tree):
                 sel.set("limit", exp.Fetch(direction="FIRST", count=cnt, with_ties=True))
             else:
                 sel.set("limit", exp.Limit(expression=cnt))
+        for key in ("limit", "offset"):  # LIMIT '5' is LIMIT 5: the literal is read as a bigint
+            node = sel.args.get(key)
+            e = node.args.get("expression") if isinstance(node, (exp.Limit, exp.Offset)) else None
+            if isinstance(e, exp.Literal) and e.is_string and re.fullmatch(r"\s*\+?\d+\s*", e.this):
+                node.set("expression", exp.Literal.number(str(int(e.this))))
     for j in tree.find_all(exp.Join):
         if (j.args.get("kind") or "").upper() in ("INNER", "OUTER"):
             j.set("kind", None)
@@ -1624,8 +1764,498 @@ def _like_matches(pattern, s, ci):
     return re.fullmatch(rx, s, re.S | (re.I if ci else 0)) is not None
 
 
+_NUMERIC_TYPES = re.compile(r"^(INT|INTEGER|BIGINT|SMALLINT|DECIMAL|NUMERIC|DOUBLE|DOUBLE PRECISION|REAL|FLOAT)\b")
+
+
+def _coerced_number(lit, other, R):
+    """An untyped string literal next to a numeric column takes the column's type: '5' is 5. Only
+    plain decimal spellings; anything else is left alone (or is an error, caught by the gate)."""
+    if not (isinstance(lit, exp.Literal) and lit.is_string and isinstance(other, exp.Column)):
+        return None
+    t = R.col_type(other)
+    if not t or not _NUMERIC_TYPES.match(t):
+        return None
+    text = lit.this.strip().lstrip("+")
+    if t.split("(")[0] in _INT_TYPES:
+        return exp.Literal.number(str(int(text))) if re.fullmatch(r"\d+", text) else None
+    return exp.Literal.number(text) if re.fullmatch(r"\d+(\.\d*)?|\.\d+", text) else None
+
+
+_BOOL_WORDS = {"t": True, "true": True, "y": True, "yes": True, "on": True, "1": True,
+               "f": False, "false": False, "n": False, "no": False, "off": False, "0": False}
+
+
+def _coerced_boolean(lit, other, R):
+    """An untyped string literal next to a boolean column is that boolean: 't', 'yes', 'on' are TRUE."""
+    if not (isinstance(lit, exp.Literal) and lit.is_string and isinstance(other, exp.Column)):
+        return None
+    if (R.col_type(other) or "") not in ("BOOLEAN", "BOOL"):
+        return None
+    v = lit.this.strip().lower()
+    hits = {b for w, b in _BOOL_WORDS.items() if w == v or len(v) >= (2 if w[0] == "o" else 1) and w.startswith(v)}
+    return exp.Boolean(this=hits.pop()) if len(hits) == 1 else None
+
+
+def _coerce_string_literals(node, R):
+    if isinstance(node, (exp.EQ, exp.NEQ, exp.NullSafeEQ, exp.NullSafeNEQ)):
+        for k, o in (("this", "expression"), ("expression", "this")):
+            b = _coerced_boolean(node.args.get(k), node.args.get(o), R)
+            if b is not None:
+                node.set(k, b)
+    if isinstance(node, (exp.EQ, exp.NEQ, exp.LT, exp.LTE, exp.GT, exp.GTE)):
+        for k, o in (("this", "expression"), ("expression", "this")):
+            num = _coerced_number(node.args.get(k), node.args.get(o), R)
+            if num is not None:
+                node.set(k, num)
+    elif isinstance(node, exp.In) and not node.args.get("query"):
+        node.set("expressions", [_coerced_number(v, node.this, R) or v for v in node.expressions])
+    elif isinstance(node, exp.Between):
+        for k in ("low", "high"):
+            num = _coerced_number(node.args.get(k), node.this, R)
+            if num is not None:
+                node.set(k, num)
+    elif isinstance(node, exp.Coalesce) and isinstance(node.this, exp.Column):
+        node.set("expressions", [_coerced_number(v, node.this, R) or v for v in node.expressions])
+    return node
+
+
+def _reversed_order(order):
+    """ORDER BY with every key reversed, NULLs placement included (ASC NULLS LAST <-> DESC NULLS FIRST)."""
+    out = []
+    for o in order.expressions:
+        desc = bool(o.args.get("desc"))
+        nf = o.args.get("nulls_first")
+        nf = desc if nf is None else bool(nf)
+        out.append(exp.Ordered(this=o.this.copy(), desc=not desc, nulls_first=not nf))
+    return exp.Order(expressions=out)
+
+
+def _frame_bounds(spec):
+    """(start, end) of a frame as 'UP' (unbounded preceding), 'P' (n preceding), 'C' (current row),
+    'F' (n following), 'UF' (unbounded following); None when it has an EXCLUDE clause or is unknown."""
+    if spec is None or spec.args.get("exclude"):
+        return None
+
+    def b(v, side):
+        v, side = str(v or "").upper(), str(side or "").upper()
+        if v == "UNBOUNDED":
+            return "UP" if side == "PRECEDING" else "UF"
+        if v == "CURRENT ROW":
+            return "C"
+        return "P" if side == "PRECEDING" else "F" if side == "FOLLOWING" else None
+    start = b(spec.args.get("start"), spec.args.get("start_side"))
+    end = b(spec.args.get("end"), spec.args.get("end_side")) if spec.args.get("end") else "C"
+    return (start, end) if start and end else None
+
+
+def _total_order_in_scope(w, R):
+    """The window's ORDER BY sorts the rows of its partitions strictly: its SELECT reads one table
+    (no joins, no GROUP BY) and the ORDER BY keys include a key of that table."""
+    sel = _owner_select(w)
+    if sel is None or sel.args.get("joins") or sel.args.get("group") or not w.args.get("order"):
+        return False
+    frm = sel.args.get("from")
+    if frm is None or not isinstance(frm.this, exp.Table):
+        return False
+    alias, tname = frm.this.alias_or_name, R.base_table(frm.this.alias_or_name)
+    if not tname:
+        return False
+    cols = {o.this.name for o in w.args["order"].expressions
+            if isinstance(o.this, exp.Column) and o.this.table == alias}
+    return any(set(k) <= cols for k in R.ctx.keys(tname))
+
+
+def _norm_value_window(node, R):
+    """first_value / last_value / nth_value(x, 1) depend only on the first or last row of the frame."""
+    if not isinstance(node, exp.Window) or node.args.get("alias"):
+        return node
+    f = node.this
+    if isinstance(f, exp.NthValue) and _lit_int(f.args.get("offset")) == 1:
+        node.set("this", exp.FirstValue(this=f.this.copy()))  # the frame's first row
+        f = node.this
+    if not isinstance(f, (exp.FirstValue, exp.LastValue)):
+        return node
+    spec = node.args.get("spec")
+    bounds = ("UP", "C") if spec is None else _frame_bounds(spec)
+    if bounds is None:
+        return node
+    if isinstance(f, exp.LastValue) and bounds[1] == "UF" and bounds[0] in ("UP", "P", "C") \
+            and _total_order_in_scope(node, R):
+        # the partition's last row in a strict order is its first row in the reversed order
+        node.set("this", exp.FirstValue(this=f.this.copy()))
+        node.set("order", _reversed_order(node.args["order"]))
+        bounds = ("UP", "C")
+        f = node.this
+    if isinstance(f, exp.FirstValue) and bounds[0] == "UP" and bounds[1] in ("C", "F", "UF"):
+        # the frame starts at the partition's first row and is never empty
+        node.set("spec", exp.WindowSpec(kind="RANGE", start="UNBOUNDED", start_side="PRECEDING", end="CURRENT ROW")
+                 if node.args.get("order") else None)
+    return node
+
+
+def _bool_never_null(e, R):
+    """A boolean expression that is TRUE or FALSE, never NULL."""
+    if isinstance(e, (exp.Is, exp.Exists, exp.Boolean)):
+        return True
+    if isinstance(e, exp.Column):
+        return R.not_null(e)
+    if isinstance(e, exp.Not):
+        return _bool_never_null(e.this, R)
+    if isinstance(e, (exp.And, exp.Or)):
+        return _bool_never_null(e.this, R) and _bool_never_null(e.expression, R)
+    if isinstance(e, (exp.EQ, exp.NEQ, exp.LT, exp.LTE, exp.GT, exp.GTE)):
+        return _never_null(e.this, R, frozenset()) and _never_null(e.expression, R, frozenset())
+    return False
+
+
+def _is_test(e, value):
+    """e is `x IS TRUE` / `x IS FALSE` (value True / False): return x."""
+    if isinstance(e, exp.Is) and isinstance(e.expression, exp.Boolean) and e.expression.this is value:
+        return e.this
+    return None
+
+
+def _truth_context(e):
+    """Where only TRUE counts (WHERE, HAVING, ON, a CASE condition), NULL and FALSE are alike: so
+    `x IS TRUE` is x and COALESCE(x, FALSE) is x. Holds through AND / OR, not through NOT."""
+    if isinstance(e, (exp.And, exp.Or)):
+        return type(e)(this=_truth_context(e.this), expression=_truth_context(e.expression))
+    x = _is_test(e, True)
+    if x is not None:
+        return x
+    if isinstance(e, exp.Coalesce) and len(e.expressions) == 1 and isinstance(e.expressions[0], exp.Boolean) \
+            and e.expressions[0].this is False:
+        return e.this
+    return e
+
+
+def _norm_boolean(node, R):
+    # truth contexts
+    if isinstance(node, (exp.Where, exp.Having)) and node.this is not None:
+        node.set("this", _truth_context(node.this))
+    elif isinstance(node, exp.Join) and node.args.get("on") is not None:
+        node.set("on", _truth_context(node.args["on"]))
+    elif isinstance(node, exp.Case) and node.this is None:
+        for i in node.args.get("ifs") or []:
+            i.set("this", _truth_context(i.this))
+        # CASE WHEN NOT c THEN a ELSE b END is CASE WHEN c THEN b ELSE a END when c is never NULL
+        ifs = node.args.get("ifs") or []
+        if len(ifs) == 1 and isinstance(ifs[0].this, exp.Not) and node.args.get("default") is not None \
+                and _bool_never_null(ifs[0].this.this, R):
+            return exp.Case(ifs=[exp.If(this=ifs[0].this.this.copy(), true=node.args["default"].copy())],
+                            default=ifs[0].args["true"].copy())
+    # x = TRUE is x, x = FALSE is NOT x, x <> TRUE is NOT x (the same NULL as x)
+    if isinstance(node, (exp.EQ, exp.NEQ)):
+        for x, b in ((node.this, node.expression), (node.expression, node.this)):
+            if isinstance(b, exp.Boolean) and not isinstance(x, exp.Boolean):
+                return x.copy() if (b.this is True) == isinstance(node, exp.EQ) else exp.Not(this=x.copy())
+    # x IS [NOT] DISTINCT FROM TRUE / FALSE is x IS [NOT] TRUE / FALSE
+    if isinstance(node, (exp.NullSafeEQ, exp.NullSafeNEQ)) and isinstance(node.expression, exp.Boolean):
+        test = exp.Is(this=node.this.copy(), expression=exp.Boolean(this=node.expression.this))
+        return test if isinstance(node, exp.NullSafeEQ) else exp.Not(this=test)
+    # COALESCE(x, FALSE) is x IS TRUE; COALESCE(x, TRUE) is x IS NOT FALSE
+    if isinstance(node, exp.Coalesce) and len(node.expressions) == 1 and isinstance(node.expressions[0], exp.Boolean):
+        if node.expressions[0].this is False:
+            return exp.Is(this=node.this.copy(), expression=exp.Boolean(this=True))
+        return exp.Not(this=exp.Is(this=node.this.copy(), expression=exp.Boolean(this=False)))
+    # x IS TRUE / FALSE on a never-NULL x is x / NOT x
+    for value in (True, False):
+        x = _is_test(node, value)
+        if x is not None and _bool_never_null(x, R):
+            return x.copy() if value else exp.Not(this=x.copy())
+        x = _is_test(node.this, value) if isinstance(node, exp.Not) else None
+        if x is not None and _bool_never_null(x, R):
+            return exp.Not(this=x.copy()) if value else x.copy()
+    # x IS NULL OR NOT x is x IS NOT TRUE; x IS NULL OR x is x IS NOT FALSE (and the AND duals)
+    if isinstance(node, (exp.Or, exp.And)) and not isinstance(node.parent, type(node)):
+        parts = (_disjuncts if isinstance(node, exp.Or) else _conjuncts)(node)
+        keyed = {p.sql() for p in parts}
+        merged, used = [], set()
+        for p in parts:
+            if p.sql() in used:
+                continue
+            if isinstance(node, exp.Or) and isinstance(p, exp.Is) and isinstance(p.expression, exp.Null):
+                x = p.this
+                neg, pos = exp.Not(this=x.copy()).sql(), x.sql()
+                hit = neg if neg in keyed - used else pos if pos in keyed - used else None
+                if hit:
+                    used |= {p.sql(), hit}
+                    merged.append(exp.Not(this=exp.Is(this=x.copy(), expression=exp.Boolean(this=hit == neg))))
+            if isinstance(node, exp.And) and isinstance(p, exp.Not) and isinstance(p.this, exp.Is) \
+                    and isinstance(p.this.expression, exp.Null):
+                x = p.this.this
+                neg, pos = exp.Not(this=x.copy()).sql(), x.sql()
+                hit = pos if pos in keyed - used else neg if neg in keyed - used else None
+                if hit:
+                    used |= {p.sql(), hit}
+                    merged.append(exp.Is(this=x.copy(), expression=exp.Boolean(this=hit == pos)))
+        if used:
+            rest = [p.copy() for p in parts if p.sql() not in used]
+            return (_or_all if isinstance(node, exp.Or) else _and_all)(merged + rest)
+    # De Morgan: NOT (a OR b) is NOT a AND NOT b; NOT (a AND b) is NOT a OR NOT b (three-valued too)
+    if isinstance(node, exp.Not) and isinstance(node.this, (exp.Or, exp.And)):
+        dual = exp.And if isinstance(node.this, exp.Or) else exp.Or
+        return dual(this=exp.Not(this=node.this.this.copy()), expression=exp.Not(this=node.this.expression.copy()))
+    # NOT bool_or(NOT x) is bool_and(x), and the dual (NULL inputs are skipped by both)
+    if isinstance(node, exp.Not) and isinstance(node.this, (exp.LogicalOr, exp.LogicalAnd)) \
+            and isinstance(node.this.this, exp.Not):
+        dual = exp.LogicalAnd if isinstance(node.this, exp.LogicalOr) else exp.LogicalOr
+        return dual(this=node.this.this.this.copy())
+    # a never-NULL boolean cast to an integer is CASE WHEN x THEN 1 ELSE 0 END
+    if isinstance(node, exp.Cast) and node.to.this in (exp.DataType.Type.INT, exp.DataType.Type.BIGINT, exp.DataType.Type.SMALLINT) \
+            and isinstance(node.this, exp.Column) and (R.col_type(node.this) or "") in ("BOOLEAN", "BOOL") \
+            and R.not_null(node.this) and node.to.this == exp.DataType.Type.INT:
+        return exp.Case(ifs=[exp.If(this=node.this.copy(), true=exp.Literal.number(1))], default=exp.Literal.number(0))
+    return node
+
+
+_TS_LITERAL = re.compile(r"\s*(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2})(\.\d{1,6})?)?)?\s*"
+                         r"(Z|[+-]\d{2}(?::?\d{2})?)?\s*")
+
+
+def _canonical_instant(text, kind):
+    """The canonical spelling of a literal read as `kind` ('tstz', 'ts' or 'date'): a local
+    'YYYY-MM-DD HH:MM:SS[.ffffff]' (session time zone), or a UTC instant ending in '+00' when a
+    timestamptz literal names its offset. None when the text is not a plain ISO date/time."""
+    m = _TS_LITERAL.fullmatch(text)
+    if not m:
+        return None
+    y, mo, d, hh, mm, ss, frac, off = m.groups()
+    try:
+        v = _dt.datetime(int(y), int(mo), int(d), int(hh or 0), int(mm or 0), int(ss or 0),
+                         int((frac or ".0")[1:].ljust(6, "0")))
+    except ValueError:
+        return None
+    if kind == "date":
+        v = v.replace(hour=0, minute=0, second=0, microsecond=0)
+    suffix = ""
+    if off and kind == "tstz":
+        if off != "Z":
+            sign = -1 if off[0] == "-" else 1
+            digits = off[1:].replace(":", "")
+            v -= sign * _dt.timedelta(hours=int(digits[:2]), minutes=int(digits[2:4] or 0))
+        suffix = "+00"
+    return v.strftime("%Y-%m-%d %H:%M:%S") + (f".{v.microsecond:06d}" if v.microsecond else "") + suffix
+
+
+def _instant_operand(e, R, utc_wall=False):
+    """A literal compared with a timestamptz column, as the canonical CAST('<instant>' AS TIMESTAMPTZ)."""
+    kinds = {exp.DataType.Type.TIMESTAMPTZ: "tstz", exp.DataType.Type.TIMESTAMP: "ts", exp.DataType.Type.DATE: "date"}
+    if isinstance(e, exp.Literal) and e.is_string:
+        text, kind = e.this, "tstz"
+    elif isinstance(e, exp.Cast) and isinstance(e.this, exp.Literal) and e.this.is_string and e.to.this in kinds \
+            and not e.to.expressions:
+        text, kind = e.this.this, kinds[e.to.this]
+    else:
+        return None
+    if utc_wall:  # compared with ts AT TIME ZONE 'UTC': a wall-clock time in UTC
+        if kind == "tstz":
+            return None
+        c = _canonical_instant(text, kind)
+        return None if c is None else exp.Cast(this=exp.Literal.string(c + "+00"), to=exp.DataType.build("TIMESTAMPTZ"))
+    c = _canonical_instant(text, kind)
+    return None if c is None else exp.Cast(this=exp.Literal.string(c), to=exp.DataType.build("TIMESTAMPTZ"))
+
+
+_UNIT_MICROS = {"MICROSECOND": 1, "MILLISECOND": 1000, "SECOND": 10 ** 6, "SEC": 10 ** 6, "S": 10 ** 6,
+                "MINUTE": 60 * 10 ** 6, "MIN": 60 * 10 ** 6, "M": 60 * 10 ** 6, "HOUR": 3600 * 10 ** 6,
+                "HR": 3600 * 10 ** 6, "H": 3600 * 10 ** 6, "DAY": 86400 * 10 ** 6, "D": 86400 * 10 ** 6,
+                "WEEK": 7 * 86400 * 10 ** 6, "W": 7 * 86400 * 10 ** 6}
+
+
+def _interval_micros(e):
+    """(micros, has_days) of an INTERVAL literal made of seconds..weeks (no months or years), counting
+    a day as 24 hours, as interval comparison does; None otherwise."""
+    if not isinstance(e, exp.Interval) or not isinstance(e.this, exp.Literal):
+        return None
+    text = e.this.this.strip()
+    unit = e.args.get("unit")
+    if unit is not None:
+        text = f"{text} {unit.name}"
+    total, days = Decimal(0), False
+    m = re.fullmatch(r"(-?)(\d+):(\d{2})(?::(\d{2}(?:\.\d+)?))?", text)
+    if m:
+        v = Decimal(m.group(2)) * 3600 + Decimal(m.group(3)) * 60 + Decimal(m.group(4) or 0)
+        total = (-v if m.group(1) else v) * 10 ** 6
+    else:
+        for num, u in re.findall(r"(-?\d+(?:\.\d+)?)\s*([A-Za-z]+)\s*", text):
+            u = u.upper()
+            u = u[:-1] if u.endswith("S") and u[:-1] in _UNIT_MICROS else u
+            if u not in _UNIT_MICROS:
+                return None
+            days = days or u in ("DAY", "D", "WEEK", "W")
+            total += Decimal(num) * _UNIT_MICROS[u]
+        if not re.fullmatch(r"(\s*-?\d+(?:\.\d+)?\s*[A-Za-z]+\s*)+", text):
+            return None
+    if total != total.to_integral_value():
+        return None
+    return int(total), days
+
+
+def _micros_interval(n):
+    return exp.Interval(this=exp.Literal.string(str(n)), unit=exp.var("MICROSECONDS"))
+
+
+def _is_ts(e, R):
+    return isinstance(e, exp.Column) and (R.col_type(e) or "") in ("TIMESTAMP", "TIMESTAMPTZ")
+
+
+def _norm_datetime(node, R):
+    # timezone(zone, ts) is ts AT TIME ZONE zone; date(x) is x::date
+    if isinstance(node, exp.Anonymous) and node.name.lower() == "timezone" and len(node.expressions) == 2:
+        return exp.AtTimeZone(this=node.expressions[1].copy(), zone=node.expressions[0].copy())
+    if isinstance(node, exp.Date) and node.this is not None and not any(v for k, v in node.args.items() if k != "this"):
+        return exp.Cast(this=node.this.copy(), to=exp.DataType.build("DATE"))
+    # LAG / LEAD (x, 1) is LAG / LEAD (x)
+    if isinstance(node, (exp.Lag, exp.Lead)) and _lit_int(node.args.get("offset")) == 1 and node.args.get("default") is None:
+        node.set("offset", None)
+    if not isinstance(node, (exp.EQ, exp.NEQ, exp.LT, exp.LTE, exp.GT, exp.GTE)):
+        if isinstance(node, (exp.Between, exp.In)) and R.col_type(node.this) == "TIMESTAMPTZ":
+            for k in ("low", "high") if isinstance(node, exp.Between) else ():
+                v = _instant_operand(node.args.get(k), R)
+                if v is not None:
+                    node.set(k, v)
+        return node
+    flip = {exp.GT: exp.LT, exp.GTE: exp.LTE, exp.LT: exp.GT, exp.LTE: exp.GTE, exp.EQ: exp.EQ, exp.NEQ: exp.NEQ}
+    # CAST(tstz AS DATE) compared with a date: the date's local midnights bound the instant
+    for x, d, op in ((node.this, node.expression, type(node)), (node.expression, node.this, flip[type(node)])):
+        if isinstance(x, exp.Cast) and x.to.this == exp.DataType.Type.DATE and R.col_type(x.this) == "TIMESTAMPTZ" \
+                and op is not exp.NEQ:
+            text = d.this if isinstance(d, exp.Literal) and d.is_string else \
+                d.this.this if isinstance(d, exp.Cast) and d.to.this == exp.DataType.Type.DATE and isinstance(d.this, exp.Literal) else None
+            day = _canonical_instant(text, "date") if text is not None else None
+            if day is None:
+                continue
+            nxt = (_dt.datetime.strptime(day, "%Y-%m-%d %H:%M:%S") + _dt.timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+            lo, hi = (exp.Cast(this=exp.Literal.string(v), to=exp.DataType.build("TIMESTAMPTZ")) for v in (day, nxt))
+            ts = x.this
+            if op is exp.EQ:
+                return exp.And(this=exp.GTE(this=ts.copy(), expression=lo), expression=exp.LT(this=ts.copy(), expression=hi))
+            return {exp.GTE: lambda: exp.GTE(this=ts.copy(), expression=lo), exp.LT: lambda: exp.LT(this=ts.copy(), expression=lo),
+                    exp.LTE: lambda: exp.LT(this=ts.copy(), expression=hi), exp.GT: lambda: exp.GTE(this=ts.copy(), expression=hi)}[op]()
+    for k, o in (("this", "expression"), ("expression", "this")):
+        a, b = node.args.get(k), node.args.get(o)
+        # a literal compared with a timestamptz column names an instant
+        if isinstance(b, exp.Column) and R.col_type(b) == "TIMESTAMPTZ":
+            v = _instant_operand(a, R)
+            if v is not None:
+                node.set(k, v)
+        # (ts AT TIME ZONE 'UTC') compared with a timestamp literal is ts compared with that UTC instant
+        if isinstance(b, exp.AtTimeZone) and isinstance(b.args.get("zone"), exp.Literal) \
+                and b.args["zone"].this.strip().upper() == "UTC" and R.col_type(b.this) == "TIMESTAMPTZ":
+            v = _instant_operand(a, R, utc_wall=True)
+            if v is not None:
+                node.set(k, v)
+                node.set(o, b.this.copy())
+    a, b = node.this, node.expression
+    # A op B + c (c a fixed number of seconds..hours) is A - B op c: the difference of two timestamps
+    # is exact, and adding a time-only interval adds exactly that much
+    for left, right, op in ((a, b, type(node)), (b, a, flip[type(node)])):
+        if _is_ts(left, R) and isinstance(right, exp.Add):
+            for base, iv in ((right.this, right.expression), (right.expression, right.this)):
+                im = _interval_micros(iv)
+                if _is_ts(base, R) and im is not None and not im[1]:
+                    return op(this=exp.Sub(this=left.copy(), expression=base.copy()), expression=iv.copy())
+    # EXTRACT(EPOCH FROM A - B) op n is A - B op INTERVAL 'n seconds' (a timestamp difference has no months)
+    for x, lit, op in ((a, b, type(node)), (b, a, flip[type(node)])):
+        if isinstance(x, exp.Extract) and str(x.this.name).upper() == "EPOCH" and isinstance(x.expression, exp.Sub) \
+                and _is_ts(x.expression.this, R) and _is_ts(x.expression.expression, R):
+            v = _num_value(lit)
+            if v is not None and (v * 10 ** 6) == (v * 10 ** 6).to_integral_value():
+                return op(this=x.expression.copy(), expression=_micros_interval(int(v * 10 ** 6)))
+    # an interval literal compared with an interval: its length (a day counts as 24 hours)
+    for x, iv, k in ((a, b, "expression"), (b, a, "this")):
+        im = _interval_micros(iv)
+        if im is not None and isinstance(x, exp.Sub) and _is_ts(x.this, R) and _is_ts(x.expression, R):
+            node.set(k, _micros_interval(im[0]))
+    return node
+
+
+def _or_all(parts):
+    parts = [p for p in parts if p is not None]
+    out = parts[0]
+    for p in parts[1:]:
+        out = exp.Or(this=out, expression=p)
+    return out
+
+
+def _plain_text_arg(e):
+    return isinstance(e, exp.Literal) and e.is_string or isinstance(e, (exp.Coalesce, exp.Lower, exp.Upper, exp.Trim))
+
+
 def _norm_expr_extra(node, R: Resolver):
     """Exact identities added on top of _norm_expr's (each holds for NULL inputs too)."""
+    node = _coerce_string_literals(node, R)
+    node = _norm_value_window(node, R)
+    node = _norm_boolean(node, R)
+    node = _norm_datetime(node, R)
+    # --- CONCAT of arguments that are never NULL is || (CONCAT only differs by skipping NULLs) ------
+    if isinstance(node, exp.Concat) and len(node.expressions) >= 2 \
+            and all(_never_null(a, R, frozenset()) for a in node.expressions) \
+            and any(_plain_text_arg(a) or R.col_type(a) and semantic.type_category(R.col_type(a)) == ("S", None)
+                    for a in node.expressions):
+        out = node.expressions[0].copy()
+        for a in node.expressions[1:]:
+            out = exp.DPipe(this=out, expression=a.copy(), safe=True)
+        return out
+    # --- btrim(x) / trim(x, ' ') is trim(x); trimming spaces commutes with changing letter case ------
+    if isinstance(node, exp.Anonymous) and node.name.lower() == "btrim" and 1 <= len(node.expressions) <= 2:
+        node = exp.Trim(this=node.expressions[0].copy(),
+                        expression=node.expressions[1].copy() if len(node.expressions) == 2 else None)
+    if isinstance(node, exp.Trim):
+        chars = node.args.get("expression")
+        if isinstance(chars, exp.Literal) and chars.is_string and chars.this == " ":
+            node.set("expression", None)
+        if str(node.args.get("position") or "").upper() == "BOTH":
+            node.set("position", None)
+        if isinstance(node.this, (exp.Lower, exp.Upper)) and node.args.get("expression") is None:
+            case = node.this
+            return type(case)(this=exp.Trim(this=case.this.copy(), position=node.args.get("position")))
+    # --- GROUPING(a, b, ..) is the bit mask 2^(n-1) * GROUPING(a) + ... + GROUPING(last) --------------
+    if isinstance(node, exp.Anonymous) and node.name.lower() == "grouping" and len(node.expressions) > 1:
+        n = len(node.expressions)
+        out = None
+        for i, a in enumerate(node.expressions):
+            g = exp.Anonymous(this="GROUPING", expressions=[a.copy()])
+            term = g if i == n - 1 else exp.Mul(this=exp.Literal.number(2 ** (n - 1 - i)), expression=g)
+            out = term if out is None else exp.Add(this=out, expression=term)
+        return out
+    # --- CAST(integer AS NUMERIC / BIGINT) compared with a number: the integer itself ------------------
+    if isinstance(node, (exp.EQ, exp.NEQ, exp.LT, exp.LTE, exp.GT, exp.GTE, exp.Between)):
+        keys = ("this", "expression") if not isinstance(node, exp.Between) else ("this",)
+        others = [node.args.get(k) for k in (("low", "high") if isinstance(node, exp.Between) else keys)]
+        for k in keys:
+            c = node.args.get(k)
+            if isinstance(c, exp.Cast) and isinstance(c.this, exp.Column) and not c.to.expressions \
+                    and c.to.this in (exp.DataType.Type.DECIMAL, exp.DataType.Type.BIGINT) \
+                    and (R.col_type(c.this) or "").split("(")[0] in _INT_TYPES \
+                    and all(o is c or _num_value(o) is not None for o in others):
+                node.set(k, c.this.copy())
+    # --- GREATEST / LEAST ------------------------------------------------------------------------------
+    if isinstance(node, (exp.Greatest, exp.Least)):
+        args = [node.this, *node.expressions]
+        keys = [a.sql() for a in args]
+        changed = False
+        for i, a in enumerate(args):
+            # COALESCE(x, y) next to y: NULLs are ignored, and y is already there
+            if isinstance(a, exp.Coalesce) and len(a.expressions) == 1 and a.expressions[0].sql() in keys[:i] + keys[i + 1:]:
+                args[i] = a.this.copy()
+                changed = True
+        if changed:
+            return type(node)(this=args[0], expressions=args[1:])
+    if isinstance(node, exp.Case) and node.this is None and len(node.args.get("ifs") or []) == 1 \
+            and node.args.get("default") is not None:
+        cond, x, c = node.args["ifs"][0].this, node.args["ifs"][0].args.get("true"), node.args["default"]
+        if isinstance(cond, (exp.GT, exp.GTE, exp.LT, exp.LTE)) and _never_null(c, R, frozenset()) \
+                and _deterministic(x) and _deterministic(c):
+            a, b = cond.this, cond.expression
+            op = type(cond)
+            if a.sql() == c.sql() and b.sql() == x.sql():  # c < x  is  x > c
+                a, b, op = b, a, {exp.GT: exp.LT, exp.GTE: exp.LTE, exp.LT: exp.GT, exp.LTE: exp.GTE}[op]
+            if a.sql() == x.sql() and b.sql() == c.sql():
+                # CASE WHEN x > c THEN x ELSE c END: a NULL x falls into ELSE, as GREATEST ignores it
+                f = exp.Greatest if op in (exp.GT, exp.GTE) else exp.Least
+                return f(this=x.copy(), expressions=[c.copy()])
     # --- date arithmetic on literals -------------------------------------------------------------
     folded = _fold_date_arithmetic(node)
     if folded is not None:
@@ -1696,6 +2326,16 @@ def _norm_expr_extra(node, R: Resolver):
             out.set("default", node.args["default"].copy())
         return out
     # --- an enum cast to text, matched against a pattern: the labels that match --------------------
+    # an enum's text compared with <> one of its labels, or IN a list of its labels, is the enum test
+    if isinstance(node, (exp.NEQ, exp.In)) and isinstance(node.this, exp.Cast) and isinstance(node.this.this, exp.Column) \
+            and node.this.to.this in (exp.DataType.Type.TEXT, exp.DataType.Type.VARCHAR) and not node.this.to.expressions:
+        info = R.column(node.this.this)
+        vals = [node.expression] if isinstance(node, exp.NEQ) else (None if node.args.get("query") else node.expressions)
+        if info and info.enum_labels and vals and all(_lit_str(v) in info.enum_labels for v in vals):
+            col = node.this.this.copy()
+            if isinstance(node, exp.NEQ):
+                return exp.NEQ(this=col, expression=exp.Literal.string(_lit_str(vals[0])))
+            return exp.In(this=col, expressions=[exp.Literal.string(_lit_str(v)) for v in vals])
     if isinstance(node, (exp.Like, exp.ILike, exp.EQ)) and isinstance(node.this, exp.Cast) \
             and isinstance(node.this.this, exp.Column) and _lit_str(node.expression) is not None \
             and node.this.to.this in (exp.DataType.Type.TEXT, exp.DataType.Type.VARCHAR) and not node.this.to.expressions:
@@ -4796,6 +5436,25 @@ class _Ser:
 
     def _Or(self, n):
         return "OR{" + ",".join(sorted(set(self(c) for c in _disjuncts(n)))) + "}"
+
+    def _Anonymous(self, n):
+        # an unquoted function name folds to lowercase, like any identifier
+        return f"FN:{str(n.this).lower()}(" + ",".join(self(a) for a in n.expressions) + ")"
+
+    def _AnonymousAggFunc(self, n):
+        return f"AGG:{str(n.this).lower()}(" + ",".join(self(a) for a in n.expressions) + ")"
+
+    def _Greatest(self, n):
+        return "GREATEST{" + ",".join(sorted(set(self(a) for a in [n.this, *n.expressions]))) + "}"
+
+    def _Least(self, n):
+        return "LEAST{" + ",".join(sorted(set(self(a) for a in [n.this, *n.expressions]))) + "}"
+
+    def _Values(self, n):
+        rows = [self(r) for r in n.expressions]
+        if isinstance(n.parent, (exp.From, exp.Join)):
+            rows.sort()  # the rows of a FROM item are a bag
+        return f"VALUES[{','.join(rows)}]:{self(n.args.get('alias'))}"
 
     def _Window(self, n):
         """Fixed argument order; PARTITION BY is a set (its order does not matter)."""

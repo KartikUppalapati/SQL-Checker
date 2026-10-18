@@ -44,6 +44,20 @@ def _analyze_gt(gt: str, schema_ddl: str | None):
         return ast, None, None
 
 
+def invalid_reason(sql: str, schema_ddl: str | None) -> str | None:
+    """Why the harness rejects sql as not a valid PostgreSQL query, or None if it accepts it
+    (including when it cannot canonicalize it). The same gate compare() applies."""
+    try:
+        parse_tree(sql)
+        ctx = context_for(schema_ddl)
+        canonical.canonicalize_tree(canonical.prepare(sql, ctx), ctx, True)
+    except Invalid as e:
+        return str(e)
+    except Exception:
+        return None
+    return None
+
+
 def compare(ground_truth: str, predicted: str, schema_ddl: str | None) -> Verdict:
     # 1. the prediction must be exactly one PostgreSQL query
     try:
