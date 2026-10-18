@@ -37,8 +37,8 @@ python -m sqleval.eval_dev --show fn                       # inspect misclassifi
 
 ## Dataset design
 
-All schemas and queries are PostgreSQL. The dataset has 8 schemas and 181 natural-language
-questions, each with a target SQL query (22–23 questions per schema).
+All schemas and queries are PostgreSQL. The dataset has 8 schemas and 197 natural-language
+questions, each with a target SQL query (24–25 questions per schema).
 
 ### How schemas were varied
 
@@ -87,7 +87,8 @@ least two schemas, so no single convention is tied to a single domain:
   `cte`, `recursive_cte`, `window`, `set_op`, `order_by`, `limit`, `exists`, `distinct`,
   `null_handling`.
 - Hand-assigned: `self_join`, `m2m`, `anti_join`, `integer_division`, `generic_names`,
-  `nullable`, `flag_int`/`flag_onoff`/`flag_enum`, `distinct_on`, `top_k`.
+  `nullable`, `flag_int`/`flag_onoff`/`flag_enum`, `distinct_on`, `top_k`, `lateral`,
+  `window_frame`, `string_func`.
 - Inherited from the schema: `shape:*`, `naming:*`, `quoting:*`, `flags:*`.
 
 The questions and SQL were written with an LLM agent (see `session/`) as Python data in
@@ -111,16 +112,16 @@ not been executed.
 
 ### Labeled pairs
 
-`dataset/pairs.jsonl` holds 2,046 pairs: 969 equivalent and 1,077 not. Each pair uses the
+`dataset/pairs.jsonl` holds 2,530 pairs: 1,205 equivalent and 1,325 not. Each pair uses the
 required fields (`id`, `schema_id`, `ground_truth`, `predicted`, `equivalent`). For analysis,
 each pair also records `query_id`, `source`, `category` and a `note` explaining the label; the
 harness ignores these. Every query in `queries.jsonl` contributes pairs from three sources:
 
 | source | equivalent | not equivalent | what it is |
 |---|---|---|---|
-| `hand` | 248 | 387 | About 3–4 hand-written predictions per query, each with a one-line reason for its label |
-| `auto` | 721 | 509 | Mutations of the target generated from its syntax tree (`generator/mutations.py`) |
-| `malformed` | 0 | 181 | One malformed prediction per query |
+| `hand` | 420 | 568 | About 5 hand-written predictions per query, each with a one-line reason for its label |
+| `auto` | 785 | 560 | Mutations of the target generated from its syntax tree (`generator/mutations.py`) |
+| `malformed` | 0 | 197 | One malformed prediction per query |
 
 **Hand-written pairs** (`generator/pairs/<schema>.py`) target the cases a string or AST diff
 gets wrong.
@@ -137,6 +138,13 @@ gets wrong.
     `ROLLUP`/`GROUPING SETS` vs a `UNION ALL` total row, and set operations vs `OR`-ed semi-joins.
   - `LIMIT 1` on an aggregate that returns one row, `OFFSET 0`, `EXCEPT ALL` over unique rows.
   - `NOT IN`/`<> ALL` with NULLs filtered out, and a `NULL` inside an `IN` list.
+  - PostgreSQL syntax a model may emit: `LATERAL` lookups and top-N, `RIGHT`/`CROSS JOIN`,
+    `= ANY (ARRAY[...])`, row-value comparisons, named `WINDOW`s, `LAG(x, 1)`, explicit default
+    `NULLS FIRST/LAST`, `GROUPING SETS`/`CUBE`, `unnest`/`LATERAL VALUES` unpivots, date `+ INTERVAL`.
+  - Facts from types and keys: enum declaration order (`status < 'done'`), integer bounds on
+    counts, `AVG` as `SUM / COUNT` over a NOT NULL column, `RANK` vs `ROW_NUMBER` when the
+    ordering is unique, `WITH TIES` with a unique last sort key, `NULLIF` where the target is
+    already NULL.
 - *Near-misses:*
   - `NOT IN` or `<> ALL` over a nullable column (the `ManagerId` trap), a `NULL` inside a `NOT IN`
     list, and `COALESCE(col, 0)` used to dodge the NULL.
@@ -156,6 +164,12 @@ gets wrong.
   - The target has an `ORDER BY` but the prediction has none.
   - Generic `name`/`country` columns read from the wrong table.
   - Columns with no constraint linking them, such as `quarter` vs `month IN (10, 11, 12)`.
+  - `FETCH … WITH TIES`, `ROLLUP`/`CUBE` total rows, `FULL JOIN`, `LEFT JOIN LATERAL`.
+  - Window frames: default cumulative frame, `ROWS` vs `RANGE … INTERVAL`, missing `PARTITION BY`.
+  - Empty-input and division-by-zero differences (`NULLIF`, `SUM(1)`, `COUNT(*) FILTER`).
+  - Values a CHECK constraint rules out (`flag <> 0` vs `flag = 1`): CHECK constraints are not
+    part of the equivalence definition, so these are labeled not equivalent.
+  - Functions from other dialects (`IFNULL`, `NVL`, `ISNULL(a, b)`, `DATEDIFF`), labeled invalid.
 
 **Automatic pairs** are chosen per query with an RNG seeded by the query id, so the build is
 deterministic.
@@ -193,7 +207,7 @@ The build refuses to write the file if any of these fail:
 - Breaking mutations change the parse tree.
 - No pair is duplicated.
 
-A harness that always answers "not equivalent" scores 52.6% on this set.
+A harness that always answers "not equivalent" scores 52.4% on this set.
 
 ## How scoring works
 
@@ -208,8 +222,10 @@ For each pair (`sqleval/equivalence.py`):
 
 1. **Validity gate.** The prediction is parsed with PostgreSQL's own grammar (libpg_query via
    `pglast`). It must be exactly one statement and must be a query. Null, empty, prose,
-   markdown-fenced, multi-statement and DML predictions are rejected here. Rejected predictions
-   get `match: false, score: 0`.
+   markdown-fenced, multi-statement and DML predictions are rejected here, and so are calls to
+   functions from other dialects that PostgreSQL does not have (`IFNULL`, `NVL`, `DATEDIFF`, ...;
+   sqlglot would otherwise map some of them onto `COALESCE`). Rejected predictions get
+   `match: false, score: 0`.
 2. **Name resolution against the schema.** sqlglot `qualify` resolves every table and column under
    PostgreSQL identifier rules: unquoted names fold to lowercase, quoted names are case-sensitive.
    The prediction is also rejected for:
@@ -222,11 +238,34 @@ For each pair (`sqleval/equivalence.py`):
    queries match.
 4. **Canonicalization** (`sqleval/canonical.py`). Each rewrite below states the condition that
    makes it sound:
-   - *Names and structure:* parentheses, `FETCH FIRST`/`LIMIT`, positional and alias references in
-     `GROUP BY`/`ORDER BY`, `*` expansion, `USING` → `ON`. CTEs become derived tables (when read
+   - *Names and structure:* parentheses, `FETCH FIRST`/`LIMIT` (`WITH TIES` is kept distinct),
+     positional and alias references in `GROUP BY`/`ORDER BY`, `*` expansion, `USING` → `ON`. CTEs become derived tables (when read
      more than once, only if deterministic: no `random()`, `nextval`, ...). Aliases are made
      globally unique. Derived-table columns nothing reads are dropped (not under `DISTINCT`), and
-     the rest are renamed by position.
+     the rest are sorted and renamed by position (only their names are read). `OVER w` is replaced
+     by the `WINDOW w` definition (an unresolved name is not canonicalized).
+   - *LATERAL, derived tables and unpivots:*
+     - `JOIN LATERAL (q) x`: a plain `q` becomes a join with q's tables and WHERE; a `LEFT JOIN
+       LATERAL` over one table whose outputs are its columns becomes `LEFT JOIN T ON …`; an
+       ungrouped aggregate `q` (exactly one row) becomes scalar subqueries; `q … ORDER BY o LIMIT 1`
+       from a single keyed outer table becomes `DISTINCT ON (<its key>) … ORDER BY <key>, o`;
+       `q … LIMIT n` over one table correlated by one equality `T.f = <outer column>` becomes a
+       join to `ROW_NUMBER() OVER (PARTITION BY T.f ORDER BY o) <= n`; and the previous (next) row by a
+       NOT NULL key `(k.., d)` of the outer table itself becomes `LAG` (`LEAD`), only when the outer
+       query reads every row of that table.
+     - A derived table that only filters and projects is merged into its outer query (as the FROM
+       item or an inner join; on the NULL side of a `LEFT JOIN` when it reads one table and outputs
+       its columns, its WHERE moving into ON).
+     - `o LEFT JOIN (SELECT k, AGG … GROUP BY k) t ON t.k = o.c`, read only through its aggregates
+       (counts as `COALESCE(t.n, 0)`), → `LEFT JOIN b` grouped by the outer keys; also under one
+       outer aggregate. `COUNT(t.x)` over `(SELECT DISTINCT g.., x …) t GROUP BY t.g..` →
+       `COUNT(DISTINCT x)`.
+     - `SELECT DISTINCT … FROM (A UNION ALL B) x …` → the `UNION` of the query over each branch.
+     - `SELECT [DISTINCT] unnest(ARRAY[a, b])` and `CROSS JOIN LATERAL (VALUES (a), (b)) v(c)` →
+       `UNION [ALL]` of one branch per element.
+     - `AGG(x) OVER ()` in an ungrouped SELECT → the scalar subquery over the same FROM / WHERE;
+       `ROW_NUMBER() OVER (ORDER BY O) <= n` (no partition) in a derived table → `ORDER BY O LIMIT n`
+       when the outer order is O itself or does not count.
    - *Row limits and set operations:*
      - `OFFSET 0` is dropped, and `LIMIT n` (n ≥ 1) on an ungrouped aggregate (exactly one row).
      - `SELECT [DISTINCT] <all columns> FROM (<set operation>) t` is the set operation; with
@@ -275,24 +314,61 @@ For each pair (`sqleval/equivalence.py`):
        `COUNT(*) FILTER (WHERE c IS NOT NULL)` and `COUNT(*) - COUNT(c)` is `COUNT(*) FILTER
        (WHERE c IS NULL)`; in an ungrouped SELECT whose aggregates share one filter, the filter
        moves to `WHERE`.
-     - `~* 'lit'`, `lower(x) LIKE` and `ILIKE` are unified.
+     - `~* 'lit'`, `lower(x) LIKE` and `ILIKE` are unified; `strpos(s, 'p') > 0` and
+       `position('p' IN s) > 0` are `s LIKE '%p%'` (p without wildcards); `char_length` is `length`.
+     - `= ANY (ARRAY[…])` / `<> ALL (ARRAY[…])` are `IN` / `NOT IN` lists; `(a, b) = (x, y)` is
+       `a = x AND b = y` (`<>`: the `OR`); `IS [NOT] DISTINCT FROM` between never-NULL operands is
+       `=` / `<>`; `COALESCE(x, c) = c` is `x IS NULL OR x = c`; a simple `CASE x WHEN v` is a
+       searched `CASE WHEN x = v`.
+     - `(SELECT COUNT(*) …) = 0` is `NOT EXISTS`, `> 0` is `EXISTS`; `(SELECT SUM(x) …) IS NOT NULL`
+       with x never NULL is `EXISTS`. `a - b` compared with 0 is `a` compared with `b` for NUMERIC
+       (or counts: no overflow). `LAG`/`LEAD` drop a default offset of 1; ranking functions drop
+       their frame. Numeric literals in comparisons are respelled (`1e4` = `10000`).
+     - `x LIKE '%'` is `x IS NOT NULL` in WHERE / HAVING / ON conditions.
+     - `SUM(x) / COUNT(x)` (`::numeric` first for integers; `COUNT(*)` when x is never NULL;
+       `NULLIF(count, 0)` allowed) is `AVG(x)`. `X / NULLIF(C, 0)` is `X / C` when C counts the input's
+       rows and X is strict in a SUM / AVG / MIN / MAX of it (or the SELECT has a plain `GROUP BY`).
+       `SUM(CASE WHEN <null test> THEN 1 ELSE -1 END)` is a difference of two filtered counts where
+       an empty input cannot show.
+     - An aggregate window with `ORDER BY` and no frame uses `RANGE … CURRENT ROW`, which is `ROWS`
+       when its partition and order keys cover the SELECT's `GROUP BY` keys.
+     - `CASE`: `COALESCE(CASE …, d)` with literal results folds d into the ELSE; a `CASE` over all
+       labels of a NOT NULL enum turns its last test into ELSE; a `CASE` whose tests compare one
+       column with numeric literals is rebuilt from the step function it computes (branch order and
+       spelling no longer matter).
    - *Type-aware literals:*
      - An untyped string compared with a DATE or TIMESTAMP column takes the column's type.
      - Bounds over discrete types are tightened: `x <= 5` → `x < 6` for integers, by one day
        for DATE and one microsecond for TIMESTAMP.
      - `EXTRACT(YEAR FROM d) = y` becomes a date range.
      - Enum comparisons are checked against the type's labels, and `<> 'No'` on a two-label enum
-       becomes `= 'Yes'`.
+       becomes `= 'Yes'`. `<` / `<=` against a label use the declaration order (an `IN` list), and
+       `enum::text LIKE / ILIKE / = 'pattern'` is the set of labels it matches.
+     - Integer-valued aggregates (`COUNT`, `SUM`/`MIN`/`MAX` of integers) get discrete bounds
+       (`COUNT(*) >= 4` is `COUNT(*) > 3`).
+     - Date arithmetic on literals is folded (`DATE '2024-01-31' + INTERVAL '1 month'` →
+       `TIMESTAMP '2024-02-29'`, months first, clamped); a DATE column compared with a timestamp
+       literal compares with the corresponding day.
    - *Per SELECT, innermost first:*
      - `IN` → `EXISTS` (also inside `OR`). `NOT IN` → `NOT EXISTS` only when both sides are
        provably non-NULL. `x IN (A INTERSECT B)` → `x IN A AND x IN B`.
      - `EXISTS (… WHERE c AND (a OR b))` → `EXISTS (… a) OR EXISTS (… b)` when each part is
        correlated.
-     - `LEFT JOIN … WHERE b.notnull_col IS NULL` → `NOT EXISTS`.
+     - `LEFT JOIN … WHERE b.notnull_col IS NULL` → `NOT EXISTS` (also for a derived table `b` whose
+       column is equated in ON); `LEFT JOIN b … GROUP BY <outer keys> HAVING COUNT(b.notnull_col) = 0`
+       → `NOT EXISTS`. `EXISTS (SELECT … FROM (<plain or DISTINCT derived>) d …)` reads d's tables
+       directly; `EXISTS (… FROM T b WHERE b.key = a.key AND p)` for an outer row a of T is p.
+     - Row-valued `IN` / `NOT IN` → `EXISTS` / `NOT EXISTS` (NOT only when every column is
+       non-NULL). An `EXISTS` over tables no condition links (after routing equalities through
+       outer columns) is split into one `EXISTS` per group of tables.
+     - A correlated aggregate in the select list guarded by an `EXISTS` over the same rows → an inner
+       join + `GROUP BY` the outer primary keys. Scalar key lookups are also replaced inside larger
+       expressions, `GROUP BY` and `ORDER BY`.
      - `LEFT JOIN` on a non-NULL foreign key → inner join.
      - A scalar subquery on a key → `LEFT JOIN`; one joining a chain of tables, each fixed by a
        key equality on the previous one and the value read from the last, → chained `LEFT JOIN`s.
-     - `NULLS FIRST`/`LAST` is reset to the default for a sort key that is never NULL.
+     - `NULLS FIRST`/`LAST` is reset to the default for a sort key that is never NULL (including
+       `COUNT`, and `SUM`/`AVG`/`MIN`/`MAX` of a never-NULL value in a plain `GROUP BY`).
      - `col = (SELECT k FROM t WHERE key = literal)` → join.
      - A single correlated aggregate subquery → `LEFT JOIN` + `GROUP BY` the outer primary keys;
        several correlated `COUNT(*)` subqueries → one `LEFT JOIN` each, counted as
@@ -308,7 +384,10 @@ For each pair (`sqleval/equivalence.py`):
      - `EXCEPT` on a unique key → `NOT EXISTS`, plus self-join-on-key removal.
      - Redundant `IS NOT NULL` filters are dropped.
      - `COUNT(non-null col)` → `COUNT(*)`.
-     - `GROUP BY` columns covering a key are reduced to the primary key.
+     - `GROUP BY` columns covering a key are reduced to the primary key. `SELECT e.. GROUP BY e..`
+       (the same set, no aggregate) is `SELECT DISTINCT e..`; a `GROUP BY` with no aggregate that
+       covers a key of every source is dropped. `x = x` on a never-NULL x is dropped.
+     - `a RIGHT JOIN b ON c [more joins]` → `b LEFT JOIN a ON c [more joins]`.
      - `ROLLUP`, `CUBE`, `GROUPING SETS` and mixed lists are expanded to one explicit list of
        grouping sets (a single set becomes a plain `GROUP BY`). Repeated sets are kept unless
        `GROUP BY DISTINCT`. The key-reduction and `DISTINCT` rules are skipped under grouping sets.
@@ -339,18 +418,23 @@ For each pair (`sqleval/equivalence.py`):
    of the canonical tokens (tables, columns, operators, literals). Invalid predictions score 0,
    and matches score 1.0.
 
-**Results on `dataset/pairs.jsonl`:** accuracy 99.8%, precision 100% (0 false positives), recall
-99.6% (4 false negatives, all hand-written semantic equivalences).
+**Results on `dataset/pairs.jsonl`:** accuracy 99.6%, precision 100% (0 false positives), recall
+99.1% (11 false negatives, all hand-written semantic equivalences). Automatic and malformed
+pairs are all scored correctly; hand-written pairs 98.9%.
 
 **Soundness checks:**
 - `tests/test_equivalence.py` places a "precondition holds" pair next to a "precondition fails"
   look-alike for every rule. Writing these tests found and fixed two real false positives:
   aggregate-ownership bugs where an aggregate inside a subquery was attributed to the outer query.
-- A stress run applying every breaking mutation to every target query (611 queries) produced no
-  false matches. Every equivalence rewrite (1,636) was recognized.
+- A stress run applying every breaking mutation to every target query (677 mutations) matched only
+  one, which is in fact equivalent (an output alias unquoted). Every hand and automatic prediction
+  compared against every other target of its schema (55,156 comparisons) matched only predictions
+  that really do equal that other target (3, `org_chart_001`/`002`).
+- Inlining named windows closed a false positive: the serializer ignored the `WINDOW` clause, so
+  `RANK() OVER w` matched whatever `w` was defined as.
 
 **Performance and determinism:**
-- 10,563 pairs take 8.8s on 2 workers (about 1,200 pairs/s) with a peak of 61 MB RSS.
+- The 2,530 dataset pairs take 1.7s on 10 workers (about 1,470 pairs/s; about 310 pairs/s on one).
 - Ground-truth analysis is cached and shared across pairs.
 - The code has no randomness, clocks, network access or execution. Output is byte-identical with
   any number of workers.
@@ -358,13 +442,16 @@ For each pair (`sqleval/equivalence.py`):
 ## Known limitations
 
 - **One-sided by design.** Equivalences that need reasoning beyond the implemented rewrites are
-  reported as non-matches. The 4 remaining false negatives:
-  - recursive CTEs seeded differently (2: a scalar vs. a joined seed; seeding with the root and
-    filtering it out);
+  reported as non-matches. The 11 remaining false negatives:
+  - recursive CTEs seeded differently (3) and `WITH TIES` with a unique last sort key (1);
   - distributing a division (`Q*P*(1 - C/100)` vs. `Q*P*C/100`): NUMERIC division rounds to a
     scale that depends on the dividend's magnitude, so the two can differ for very large values;
-  - an average of per-post counts vs. a ratio of table counts: needs the counts to be summed
-    through a foreign key, and the naive `COUNT/COUNT` form divides by zero where `AVG` is NULL.
+  - `AVG(x) > k` vs. `SUM(x) > k * COUNT(*)`: AVG's NUMERIC division rounds, so on enormous inputs
+    the two can disagree at the bound;
+  - a LATERAL top-n with grouping inside it vs. a `ROW_NUMBER`/`RANK` over a join that already
+    includes the outer table (2); a correlated sum over a date range vs. a `RANGE INTERVAL` window;
+    `LEAST`/`GREATEST` pairing vs. an ordered self-join; and an average of per-post counts vs. a
+    ratio of table counts (needs the counts summed through a foreign key).
 - **CHECK constraints are ignored.** The task defines validity by types, keys, NOT NULL and
   foreign keys, so `flag <> 0` is not treated as equal to `flag = 1`. Enum types are used.
 - **Numeric display scale is not modelled.** Results are compared by value semantics. Rewrites
@@ -375,8 +462,8 @@ For each pair (`sqleval/equivalence.py`):
   returning several rows) are not detected.
 - **Ties under `ORDER BY … LIMIT`.** Two queries with the same `ORDER BY` and `LIMIT` are
   treated as equal even when ties make both nondeterministic. The same goes for
-  `ROW_NUMBER() = 1` and `DISTINCT ON` with the same ordering. A prediction that adds a
-  tie-breaker is reported as different.
+  `ROW_NUMBER() = 1` / `<= n`, `DISTINCT ON` and `LATERAL … LIMIT n` with the same ordering. A
+  prediction that adds a tie-breaker is reported as different.
 - **sqlglot coverage.** If sqlglot can't parse a construct PostgreSQL accepts (e.g.
   `BETWEEN SYMMETRIC`), the pair falls back to parse-tree identity and is reported as
   `unsupported`, not invalid.

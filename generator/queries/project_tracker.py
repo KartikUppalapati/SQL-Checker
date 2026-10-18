@@ -159,4 +159,19 @@ SELECT depends_on_task_id FROM task_dependencies""",
 UNION ALL
 SELECT NULL, COUNT(*) FROM tasks""",
      []),
+
+    ("For each project with open (not done) tasks, show the most recently created open task: project id, task id and task name. Break ties by the highest task id.",
+     """SELECT DISTINCT ON (project_id) project_id, id, name
+FROM tasks
+WHERE status <> 'done'
+ORDER BY project_id, created_at DESC, id DESC""",
+     ['distinct_on', 'flag_enum']),
+
+    ("For each user and each day on which they logged time, show the hours logged that day and the total hours over the trailing 7 calendar days (that day and the 6 days before).",
+     """SELECT user_id, logged_on, SUM(hours) AS day_hours,
+       SUM(SUM(hours)) OVER (PARTITION BY user_id ORDER BY logged_on
+                             RANGE BETWEEN INTERVAL '6 days' PRECEDING AND CURRENT ROW) AS week_hours
+FROM time_entries
+GROUP BY user_id, logged_on""",
+     ['window_frame', 'dates']),
 ]

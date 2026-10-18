@@ -160,4 +160,17 @@ SELECT "MenteeId" FROM "Mentorship\"""",
 UNION ALL
 SELECT NULL, COUNT(*) FROM "Employee\"""",
      []),
+
+    ("For every salary-history entry, show the employee id, effective date, salary, and the change from that employee's previous entry (NULL for their first entry).",
+     '''SELECT "EmployeeId", "EffectiveDate", "Salary",
+       "Salary" - LAG("Salary") OVER (PARTITION BY "EmployeeId" ORDER BY "EffectiveDate") AS "Change"
+FROM "SalaryHistory"''',
+     ['window']),
+
+    ("Among active employees, how many work remotely and how many on site? Label the groups 'remote' and 'onsite'.",
+     """SELECT CASE WHEN "IsRemote" = 'Yes' THEN 'remote' ELSE 'onsite' END AS arrangement, COUNT(*)
+FROM "Employee"
+WHERE "Status" = 'Active'
+GROUP BY 1""",
+     ['case', 'flag_enum']),
 ]

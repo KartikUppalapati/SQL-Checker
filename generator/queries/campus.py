@@ -165,4 +165,19 @@ SELECT name FROM instructors""",
 UNION
 SELECT code FROM courses WHERE is_online = 0 AND credits = 4""",
      ["flag_int"]),
+
+    ("For each student with at least one enrollment, show their name, the number of courses passed (graded 2.0 or higher) and the number failed (graded below 2.0). Ungraded enrollments count as neither.",
+     """SELECT s.name,
+       SUM(CASE WHEN e.grade >= 2.0 THEN 1 ELSE 0 END) AS passed,
+       SUM(CASE WHEN e.grade < 2.0 THEN 1 ELSE 0 END) AS failed
+FROM students s
+JOIN enrollments e ON e.student_id = s.id
+GROUP BY s.id, s.name""",
+     ['case', 'nullable']),
+
+    ("For each department that has instructors, show the best-paid instructor: department id, instructor name and salary. Instructors with an unknown salary rank last, and ties go to the lowest instructor id.",
+     """SELECT DISTINCT ON (i.department_id) i.department_id, i.name, i.salary
+FROM instructors i
+ORDER BY i.department_id, i.salary DESC NULLS LAST, i.id""",
+     ['distinct_on', 'nullable']),
 ]

@@ -19,6 +19,12 @@ PAIRS = {
          'INVALID: quoted "Name" is case-sensitive; the column is name'),
         (E, "SELECT NAME FROM STUDENTS WHERE IS_ACTIVE = 1",
          "unquoted identifiers fold to lowercase"),
+        (N, "SELECT name FROM students WHERE is_active = TRUE",
+         "type error in PostgreSQL: there is no smallint = boolean operator"),
+        (N, "SELECT name FROM students WHERE is_active",
+         "type error in PostgreSQL: a SMALLINT is not a boolean condition"),
+        (N, "SELECT name FROM students WHERE is_active <> 0",
+         "CHECK constraints are not part of the equivalence definition: a value outside the CHECK list would make these differ"),
     ],
     2: [
         (E, "SELECT c.name, d.name FROM departments d, courses c WHERE c.department_id = d.id",
@@ -31,6 +37,16 @@ PAIRS = {
          "columns in the wrong order"),
         (N, "SELECT courses.name, courses.name FROM courses JOIN departments ON departments.id = courses.department_id",
          "generic column name resolved to the wrong table"),
+        (E, "SELECT c.name, d.name FROM departments d RIGHT JOIN courses c ON d.id = c.department_id",
+         "RIGHT JOIN keeps every course; department_id is NOT NULL and references departments, so no row is NULL-extended"),
+        (N, "SELECT c.name, d.name FROM courses c RIGHT JOIN departments d ON d.id = c.department_id",
+         "RIGHT JOIN on the wrong side adds departments with no courses"),
+        (N, "SELECT c.name, d.name FROM courses c FULL JOIN departments d ON d.id = c.department_id",
+         "FULL JOIN adds departments with no courses"),
+        (E, "SELECT c.name, d.name FROM courses c CROSS JOIN departments d WHERE d.id = c.department_id",
+         "CROSS JOIN filtered on the key is an inner join"),
+        (E, "SELECT c.name, d.name FROM courses c JOIN LATERAL (SELECT name FROM departments WHERE id = c.department_id) d ON TRUE",
+         "LATERAL lookup by primary key; the NOT NULL FK always finds one row"),
     ],
     3: [
         (E, "SELECT c.code, (SELECT COUNT(*) FROM enrollments e WHERE e.course_id = c.id) FROM courses c",
@@ -41,6 +57,14 @@ PAIRS = {
          "COUNT(*) counts the NULL-extended row: 1 instead of 0 for empty courses"),
         (N, "SELECT c.code, COUNT(*) FROM courses c JOIN enrollments e ON e.course_id = c.id GROUP BY c.id, c.code",
          "inner join drops courses with no enrollments"),
+        (E, "SELECT c.code, COALESCE(t.n, 0) FROM courses c LEFT JOIN (SELECT course_id, COUNT(*) AS n FROM enrollments GROUP BY course_id) t ON t.course_id = c.id",
+         "pre-aggregated counts; COALESCE turns the missing count into 0"),
+        (N, "SELECT c.code, t.n FROM courses c LEFT JOIN (SELECT course_id, COUNT(*) AS n FROM enrollments GROUP BY course_id) t ON t.course_id = c.id",
+         "NULL instead of 0 for courses with no enrollments"),
+        (E, "SELECT c.code, COUNT(*) FILTER (WHERE e.student_id IS NOT NULL) FROM courses c LEFT JOIN enrollments e ON e.course_id = c.id GROUP BY c.id, c.code",
+         "FILTER skips the NULL-extended row"),
+        (N, "SELECT c.code, COUNT(DISTINCT e.student_id) FROM courses c LEFT JOIN enrollments e ON e.course_id = c.id GROUP BY c.id, c.code",
+         "a student who took the course in two terms is counted once"),
     ],
     4: [
         (E, "SELECT id, name FROM students WHERE NOT (email IS NOT NULL)",
@@ -55,6 +79,10 @@ PAIRS = {
          "LIMIT 1 without ORDER BY returns one arbitrary student"),
         (E, "SELECT id, name FROM students WHERE email IS NULL OFFSET 0",
          "OFFSET 0 skips nothing"),
+        (E, "SELECT id, name FROM students WHERE email IS NOT DISTINCT FROM NULL",
+         "IS NOT DISTINCT FROM NULL is IS NULL"),
+        (N, "SELECT id, name FROM students WHERE COALESCE(email, '') = ''",
+         "also returns students whose email is an empty string"),
     ],
     5: [
         (E, "SELECT s.name FROM students s LEFT JOIN enrollments e ON e.student_id = s.id WHERE e.student_id IS NULL",
@@ -63,6 +91,12 @@ PAIRS = {
          "NOT IN is safe: enrollments.student_id is NOT NULL"),
         (N, "SELECT name FROM students EXCEPT SELECT s.name FROM students s JOIN enrollments e ON e.student_id = s.id",
          "EXCEPT works on names: removes duplicates and drops a never-enrolled student who shares a name with an enrolled one"),
+        (E, "SELECT name FROM students WHERE id <> ALL (SELECT student_id FROM enrollments)",
+         "<> ALL is NOT IN; enrollments.student_id is NOT NULL"),
+        (E, "SELECT s.name FROM students s WHERE (SELECT COUNT(*) FROM enrollments e WHERE e.student_id = s.id) = 0",
+         "correlated count of zero"),
+        (N, "SELECT s.name FROM students s LEFT JOIN enrollments e ON e.student_id = s.id AND e.term = '2024FA' WHERE e.student_id IS NULL",
+         "students not enrolled in 2024FA, not students never enrolled"),
     ],
     6: [
         (E, "SELECT d.name, AVG(e.grade) FROM departments d JOIN courses c ON c.department_id = d.id JOIN enrollments e ON e.course_id = c.id WHERE e.grade IS NOT NULL GROUP BY d.name ORDER BY 2 DESC",
@@ -71,6 +105,10 @@ PAIRS = {
          "without the filter, departments whose enrollments are all ungraded appear with a NULL average"),
         (N, "SELECT d.name, AVG(e.grade) AS avg_grade FROM enrollments e JOIN courses c ON c.id = e.course_id JOIN departments d ON d.id = c.department_id WHERE e.grade IS NOT NULL GROUP BY d.id, d.name ORDER BY avg_grade",
          "ascending instead of descending"),
+        (E, "SELECT d.name, AVG(e.grade) AS avg_grade FROM enrollments e JOIN courses c ON c.id = e.course_id JOIN departments d ON d.id = c.department_id WHERE e.grade IS NOT NULL GROUP BY d.id, d.name ORDER BY avg_grade DESC NULLS LAST",
+         "the average of non-NULL grades over a non-empty group is never NULL, so NULLS LAST changes nothing"),
+        (N, "SELECT d.name, ROUND(AVG(e.grade), 2) AS avg_grade FROM enrollments e JOIN courses c ON c.id = e.course_id JOIN departments d ON d.id = c.department_id WHERE e.grade IS NOT NULL GROUP BY d.id, d.name ORDER BY avg_grade DESC",
+         "rounded averages"),
     ],
     7: [
         (E, "SELECT i.name, COUNT(*) FROM course_instructors ci JOIN instructors i ON i.id = ci.instructor_id WHERE ci.role = 'lead' GROUP BY i.id, i.name ORDER BY COUNT(*) DESC, i.name FETCH FIRST 3 ROWS ONLY",
@@ -85,6 +123,12 @@ PAIRS = {
          "first 3 by name, not by course count"),
         (N, "SELECT i.name, COUNT(*) AS lead_courses FROM instructors i JOIN course_instructors ci ON ci.instructor_id = i.id WHERE ci.role = 'lead' GROUP BY i.id, i.name ORDER BY lead_courses DESC, i.name LIMIT 4",
          "off by one: 4 rows instead of 3"),
+        (E, "SELECT name, n FROM (SELECT i.name, COUNT(*) AS n, ROW_NUMBER() OVER (ORDER BY COUNT(*) DESC, i.name) AS rn FROM instructors i JOIN course_instructors ci ON ci.instructor_id = i.id WHERE ci.role = 'lead' GROUP BY i.id, i.name) t WHERE rn <= 3 ORDER BY n DESC, name",
+         "ROW_NUMBER over the same ordering keeps the same three rows; rows tied on (count, name) are identical"),
+        (N, "SELECT i.name, COUNT(*) AS lead_courses FROM instructors i JOIN course_instructors ci ON ci.instructor_id = i.id WHERE ci.role = 'lead' GROUP BY i.id, i.name ORDER BY lead_courses DESC, i.name DESC LIMIT 3",
+         "tie-break on name reversed"),
+        (N, "SELECT i.name, COUNT(*) AS lead_courses FROM instructors i JOIN course_instructors ci ON ci.instructor_id = i.id WHERE ci.role = 'lead' GROUP BY i.id, i.name ORDER BY lead_courses DESC, i.name FETCH FIRST 3 ROWS WITH TIES",
+         "WITH TIES returns more than 3 rows when third place is tied"),
     ],
     8: [
         (E, "SELECT c.name, p.name FROM courses c JOIN course_prerequisites cp ON cp.course_id = c.id JOIN courses p ON cp.prerequisite_id = p.id",
@@ -93,6 +137,10 @@ PAIRS = {
          "scalar subqueries over NOT NULL FKs"),
         (N, "SELECT c.name, p.name FROM course_prerequisites cp JOIN courses c ON c.id = cp.prerequisite_id JOIN courses p ON p.id = cp.course_id",
          "roles of the self-join reversed"),
+        (E, "SELECT c.name AS course, p.name AS prerequisite FROM courses c, courses p WHERE EXISTS (SELECT 1 FROM course_prerequisites cp WHERE cp.course_id = c.id AND cp.prerequisite_id = p.id)",
+         "the (course_id, prerequisite_id) primary key means each pair occurs at most once"),
+        (N, "SELECT DISTINCT c.name, p.name FROM course_prerequisites cp JOIN courses c ON c.id = cp.course_id JOIN courses p ON p.id = cp.prerequisite_id",
+         "DISTINCT merges pairs of different courses that share names"),
     ],
     9: [
         (E, "SELECT c.code FROM courses c WHERE NOT EXISTS (SELECT 1 FROM course_prerequisites cp WHERE cp.course_id = c.id)",
@@ -101,6 +149,10 @@ PAIRS = {
          "EXCEPT is safe because code is UNIQUE NOT NULL"),
         (N, "SELECT code FROM courses WHERE id NOT IN (SELECT prerequisite_id FROM course_prerequisites)",
          "wrong side of the self-reference: courses that are not prerequisites"),
+        (E, "SELECT c.code FROM courses c LEFT JOIN course_prerequisites cp ON cp.course_id = c.id GROUP BY c.id, c.code HAVING COUNT(cp.prerequisite_id) = 0",
+         "no matched prerequisite rows"),
+        (N, "SELECT c.code FROM courses c LEFT JOIN course_prerequisites cp ON cp.course_id = c.id GROUP BY c.id, c.code HAVING COUNT(*) = 0",
+         "COUNT(*) counts the NULL-extended row, so it is never 0 and the result is empty"),
     ],
     10: [
         (E, "SELECT s.name, SUM(c.credits) FROM enrollments e JOIN students s ON s.id = e.student_id JOIN courses c ON c.id = e.course_id WHERE e.term = '2024FA' GROUP BY s.id",
@@ -109,6 +161,12 @@ PAIRS = {
          "students sharing a name are merged"),
         (N, "SELECT s.name, SUM(DISTINCT c.credits) FROM students s JOIN enrollments e ON e.student_id = s.id JOIN courses c ON c.id = e.course_id WHERE e.term = '2024FA' GROUP BY s.id, s.name",
          "SUM(DISTINCT) undercounts courses with equal credits"),
+        (E, "SELECT s.name, t.total FROM students s JOIN LATERAL (SELECT SUM(c.credits) AS total FROM enrollments e JOIN courses c ON c.id = e.course_id WHERE e.student_id = s.id AND e.term = '2024FA') t ON t.total IS NOT NULL",
+         "LATERAL aggregate per student; credits is NOT NULL, so the sum is NULL exactly when the student has no 2024FA enrollment"),
+        (N, "SELECT s.name, SUM(c.credits) FROM students s LEFT JOIN enrollments e ON e.student_id = s.id AND e.term = '2024FA' LEFT JOIN courses c ON c.id = e.course_id GROUP BY s.id, s.name",
+         "includes students with no 2024FA enrollments, with a NULL total"),
+        (N, "SELECT s.name, SUM(c.credits) FROM students s JOIN enrollments e ON e.student_id = s.id JOIN courses c ON c.id = e.course_id WHERE e.term = '2024FA' GROUP BY e.student_id",
+         "PostgreSQL rejects this: s.name must appear in GROUP BY, since e.student_id is not the students primary key"),
     ],
     11: [
         (E, "SELECT SUM(is_international) * 100.0 / COUNT(*) FROM students",
@@ -121,6 +179,10 @@ PAIRS = {
          "restricted to active students"),
         (E, "SELECT 100.0 * SUM(is_international) / COUNT(*) FROM students LIMIT 1",
          "an aggregate without GROUP BY returns exactly one row, so LIMIT 1 changes nothing"),
+        (N, "SELECT 100.0 * COUNT(*) FILTER (WHERE is_international = 1) / COUNT(*) FROM students",
+         "on an empty table the target returns NULL, but this divides 0 by 0 and raises an error"),
+        (E, "SELECT 100.0 * SUM(is_international) / NULLIF(COUNT(*), 0) FROM students",
+         "NULLIF changes nothing: when COUNT(*) is 0, SUM is NULL and the target is already NULL"),
     ],
     12: [
         (E, "SELECT COUNT(*) / (SELECT COUNT(*) FROM instructors) FROM students",
@@ -129,6 +191,8 @@ PAIRS = {
          "numeric division keeps the fraction"),
         (N, "SELECT ROUND((SELECT COUNT(*) FROM students)::numeric / (SELECT COUNT(*) FROM instructors))",
          "rounds instead of truncating"),
+        (N, "SELECT (SELECT COUNT(*) FROM students) / NULLIF((SELECT COUNT(*) FROM instructors), 0)",
+         "with no instructors the target raises division by zero; this returns NULL"),
     ],
     13: [
         (E, "SELECT s.name FROM students s WHERE s.id IN (SELECT e.student_id FROM enrollments e JOIN courses c ON c.id = e.course_id WHERE c.code = 'CS101') AND s.id IN (SELECT e.student_id FROM enrollments e JOIN courses c ON c.id = e.course_id WHERE c.code = 'MATH201')",
@@ -139,6 +203,12 @@ PAIRS = {
          "INTERSECT on names: removes duplicates and matches two different students with the same name"),
         (N, "SELECT s.name FROM students s JOIN enrollments e ON e.student_id = s.id JOIN courses c ON c.id = e.course_id WHERE c.code IN ('CS101', 'MATH201')",
          "either course, with duplicates"),
+        (E, "SELECT name FROM students WHERE id IN (SELECT e.student_id FROM enrollments e JOIN courses c ON c.id = e.course_id WHERE c.code = 'CS101' INTERSECT SELECT e.student_id FROM enrollments e JOIN courses c ON c.id = e.course_id WHERE c.code = 'MATH201')",
+         "INTERSECT of student ids inside IN"),
+        (E, "SELECT s.name FROM students s JOIN enrollments e ON e.student_id = s.id JOIN courses c ON c.id = e.course_id WHERE c.code = ANY (ARRAY['CS101', 'MATH201']) GROUP BY s.id, s.name HAVING COUNT(DISTINCT c.code) = 2",
+         "= ANY over an array literal"),
+        (N, "SELECT s.name FROM students s JOIN enrollments e ON e.student_id = s.id JOIN courses c ON c.id = e.course_id WHERE c.code IN ('CS101', 'MATH201') GROUP BY s.id, s.name HAVING COUNT(*) = 2",
+         "a student who took CS101 in two terms is counted twice"),
     ],
     14: [
         (E, "SELECT d.name, t.total, d.budget FROM departments d JOIN (SELECT department_id, SUM(salary) AS total FROM instructors GROUP BY department_id) t ON t.department_id = d.id WHERE t.total > d.budget",
@@ -147,6 +217,12 @@ PAIRS = {
          ">= includes departments exactly at budget"),
         (N, "SELECT d.name, SUM(i.salary), d.budget FROM departments d JOIN instructors i ON i.department_id = d.id GROUP BY d.id, d.name, d.budget HAVING SUM(i.salary) > d.budget OR d.budget IS NULL",
          "also returns departments with no budget"),
+        (E, "SELECT d.name, SUM(i.salary), d.budget FROM departments d JOIN instructors i ON i.department_id = d.id GROUP BY d.id HAVING SUM(i.salary) > d.budget",
+         "name and budget are functionally dependent on the primary key d.id"),
+        (N, "SELECT d.name, SUM(i.salary), d.budget FROM departments d JOIN instructors i ON i.department_id = d.id GROUP BY d.id, d.name, d.budget HAVING SUM(COALESCE(i.salary, 0)) > COALESCE(d.budget, 0)",
+         "treats a missing budget as 0, so departments without a budget are returned"),
+        (E, "SELECT d.name, SUM(i.salary), d.budget FROM departments d JOIN instructors i ON i.department_id = d.id GROUP BY d.id, d.name, d.budget HAVING NOT (SUM(i.salary) <= d.budget)",
+         "NOT (a <= b) is a > b; both are NULL when either side is NULL"),
     ],
     15: [
         (E, "SELECT name, hire_date FROM instructors WHERE hire_date >= '2020-01-01' AND is_tenured = 1 ORDER BY hire_date DESC",
@@ -157,6 +233,12 @@ PAIRS = {
          "excludes hires on Jan 1, 2020"),
         (N, "SELECT name, hire_date FROM instructors WHERE is_tenured = 1 AND hire_date >= DATE '2020-01-01'",
          "target is ordered; prediction has no ORDER BY"),
+        (E, "SELECT name, hire_date FROM instructors WHERE is_tenured = 1 AND hire_date > DATE '2019-12-31' ORDER BY hire_date DESC",
+         "for a DATE, after Dec 31, 2019 is on or after Jan 1, 2020"),
+        (E, "SELECT name, hire_date FROM instructors WHERE is_tenured = 1 AND hire_date >= DATE '2020-01-01' ORDER BY hire_date DESC NULLS LAST",
+         "hire_date is NOT NULL"),
+        (N, "SELECT name, hire_date FROM instructors WHERE is_tenured = 1 AND hire_date >= DATE '2020-01-01' - INTERVAL '1 day' ORDER BY hire_date DESC",
+         "includes hires on Dec 31, 2019"),
     ],
     16: [
         (E, "SELECT c.code, c.capacity, COUNT(*) FROM courses c JOIN enrollments e ON e.course_id = c.id WHERE e.term = '2024FA' AND c.capacity IS NOT NULL GROUP BY c.id, c.code, c.capacity HAVING COUNT(*) > c.capacity",
@@ -165,6 +247,10 @@ PAIRS = {
          "includes courses exactly at capacity"),
         (N, "SELECT c.code, c.capacity, COUNT(*) FROM courses c JOIN enrollments e ON e.course_id = c.id GROUP BY c.id, c.code, c.capacity HAVING COUNT(*) > c.capacity",
          "counts enrollments from all terms"),
+        (E, "SELECT c.code, c.capacity, COUNT(*) FROM courses c JOIN enrollments e ON e.course_id = c.id WHERE e.term = '2024FA' GROUP BY c.id HAVING COUNT(*) > c.capacity",
+         "code and capacity are functionally dependent on the primary key"),
+        (N, "SELECT c.code, c.capacity, COUNT(*) FROM courses c JOIN enrollments e ON e.course_id = c.id WHERE e.term = '2024FA' GROUP BY c.id, c.code, c.capacity HAVING COUNT(*) > COALESCE(c.capacity, 0)",
+         "courses with unlimited capacity count as over capacity"),
     ],
     17: [
         (E, """WITH RECURSIVE pre(cid) AS (
@@ -189,6 +275,31 @@ SELECT c.code FROM courses c JOIN r ON r.id = c.id WHERE c.code <> 'CS301'""",
          "excluding CS301 differs when the prerequisite graph has a cycle through CS301"),
         (N, "WITH RECURSIVE prereqs AS (SELECT cp.prerequisite_id AS id FROM course_prerequisites cp JOIN courses c ON c.id = cp.course_id WHERE c.code = 'CS301' UNION ALL SELECT cp.prerequisite_id FROM course_prerequisites cp JOIN prereqs p ON cp.course_id = p.id) SELECT courses.code FROM courses JOIN prereqs ON prereqs.id = courses.id",
          "UNION ALL revisits a prerequisite reachable along several paths and lists it more than once (and never terminates on a cycle)"),
+        (E, """WITH RECURSIVE prereqs AS (
+    SELECT cp.prerequisite_id AS id
+    FROM course_prerequisites cp
+    JOIN courses c ON c.id = cp.course_id
+    WHERE c.code = 'CS301'
+    UNION
+    SELECT cp.prerequisite_id
+    FROM course_prerequisites cp
+    JOIN prereqs p ON cp.course_id = p.id
+)
+SELECT c.code FROM courses c WHERE EXISTS (SELECT 1 FROM prereqs p WHERE p.id = c.id)""",
+         "UNION makes prereqs duplicate-free, so the join is a semi-join"),
+        (N, """WITH RECURSIVE prereqs(id, depth) AS (
+    SELECT cp.prerequisite_id, 1
+    FROM course_prerequisites cp
+    JOIN courses c ON c.id = cp.course_id
+    WHERE c.code = 'CS301'
+    UNION
+    SELECT cp.prerequisite_id, p.depth + 1
+    FROM course_prerequisites cp
+    JOIN prereqs p ON cp.course_id = p.id
+    WHERE p.depth < 3
+)
+SELECT DISTINCT courses.code FROM courses JOIN prereqs ON prereqs.id = courses.id""",
+         "stops three levels down"),
     ],
     18: [
         (E, "SELECT d.name, s.name, RANK() OVER (PARTITION BY s.department_id ORDER BY AVG(e.grade) DESC) FROM students s JOIN departments d ON d.id = s.department_id JOIN enrollments e ON e.student_id = s.id WHERE e.grade IS NOT NULL GROUP BY d.id, d.name, s.id, s.name",
@@ -197,6 +308,12 @@ SELECT c.code FROM courses c JOIN r ON r.id = c.id WHERE c.code <> 'CS301'""",
          "ROW_NUMBER breaks ties differently than RANK"),
         (N, "SELECT d.name, s.name, DENSE_RANK() OVER (PARTITION BY d.id ORDER BY AVG(e.grade) DESC) FROM students s JOIN departments d ON d.id = s.department_id JOIN enrollments e ON e.student_id = s.id WHERE e.grade IS NOT NULL GROUP BY d.id, d.name, s.id, s.name",
          "DENSE_RANK leaves no gaps after ties"),
+        (E, "SELECT d.name, s.name, RANK() OVER w FROM students s JOIN departments d ON d.id = s.department_id JOIN enrollments e ON e.student_id = s.id WHERE e.grade IS NOT NULL GROUP BY d.id, d.name, s.id, s.name WINDOW w AS (PARTITION BY d.id ORDER BY AVG(e.grade) DESC)",
+         "named WINDOW clause"),
+        (N, "SELECT d.name, s.name, RANK() OVER (PARTITION BY d.id ORDER BY AVG(e.grade)) FROM students s JOIN departments d ON d.id = s.department_id JOIN enrollments e ON e.student_id = s.id WHERE e.grade IS NOT NULL GROUP BY d.id, d.name, s.id, s.name",
+         "lowest average ranked first"),
+        (N, "SELECT d.name, s.name, RANK() OVER (ORDER BY AVG(e.grade) DESC) FROM students s JOIN departments d ON d.id = s.department_id JOIN enrollments e ON e.student_id = s.id WHERE e.grade IS NOT NULL GROUP BY d.id, d.name, s.id, s.name",
+         "ranks across all departments instead of within each"),
     ],
     19: [
         (E, "SELECT COALESCE(d.name, 'Undeclared'), COUNT(s.id) FROM students s LEFT JOIN departments d ON s.department_id = d.id GROUP BY 1",
@@ -207,6 +324,12 @@ SELECT c.code FROM courses c JOIN r ON r.id = c.id WHERE c.code <> 'CS301'""",
          "inner join drops undeclared students"),
         (N, "SELECT COALESCE(d.name, 'Undeclared'), COUNT(*) FROM students s LEFT JOIN departments d ON d.id = s.department_id GROUP BY d.name",
          "a real department named 'Undeclared' is merged with the NULL group by the target but kept separate here"),
+        (E, "SELECT CASE WHEN d.name IS NULL THEN 'Undeclared' ELSE d.name END, COUNT(*) FROM students s LEFT JOIN departments d ON d.id = s.department_id GROUP BY 1",
+         "CASE spelled-out COALESCE"),
+        (E, "SELECT COALESCE((SELECT d.name FROM departments d WHERE d.id = s.department_id), 'Undeclared'), COUNT(*) FROM students s GROUP BY 1",
+         "scalar subquery lookup by primary key"),
+        (N, "SELECT IFNULL(d.name, 'Undeclared'), COUNT(*) FROM students s LEFT JOIN departments d ON d.id = s.department_id GROUP BY 1",
+         "INVALID: IFNULL is MySQL; PostgreSQL has no such function"),
     ],
     20: [
         (E, "SELECT c.name FROM courses c WHERE c.is_online = 1 AND (SELECT COUNT(*) FROM course_instructors ci WHERE ci.course_id = c.id) > 1",
@@ -215,6 +338,10 @@ SELECT c.code FROM courses c JOIN r ON r.id = c.id WHERE c.code <> 'CS301'""",
          "missing online filter"),
         (N, "SELECT c.name FROM courses c JOIN course_instructors ci ON ci.course_id = c.id WHERE c.is_online = 1 GROUP BY c.id, c.name HAVING COUNT(*) >= 1",
          "any instructor, not more than one"),
+        (E, "SELECT c.name FROM courses c WHERE c.is_online = 1 AND EXISTS (SELECT 1 FROM course_instructors a JOIN course_instructors b ON b.course_id = a.course_id AND b.instructor_id <> a.instructor_id WHERE a.course_id = c.id)",
+         "two different instructors exist"),
+        (N, "SELECT c.name FROM courses c JOIN course_instructors ci ON ci.course_id = c.id WHERE c.is_online = 1 GROUP BY c.id, c.name HAVING COUNT(DISTINCT ci.role) > 1",
+         "needs both a lead and an assistant: two co-leads do not count"),
     ],
     21: [
         (E, "SELECT name FROM departments WHERE id NOT IN (SELECT department_id FROM students WHERE department_id IS NOT NULL)",
@@ -243,6 +370,10 @@ SELECT c.code FROM courses c JOIN r ON r.id = c.id WHERE c.code <> 'CS301'""",
          "students only"),
         (N, "SELECT name FROM students INTERSECT SELECT name FROM instructors",
          "names shared by a student and an instructor"),
+        (E, "SELECT * FROM (SELECT name FROM students UNION SELECT name FROM instructors) u",
+         "star over a derived UNION"),
+        (N, "SELECT lower(name) FROM students UNION SELECT lower(name) FROM instructors",
+         "lower-casing merges names that differ only in case"),
     ],
     23: [
         (E, "SELECT code FROM courses WHERE is_online = 1 UNION ALL SELECT code FROM courses WHERE is_online = 0 AND credits = 4",
@@ -255,5 +386,25 @@ SELECT c.code FROM courses c JOIN r ON r.id = c.id WHERE c.code <> 'CS301'""",
          "off by one: >= 4 includes 5-credit courses"),
         (N, "SELECT code FROM courses WHERE is_online = 1 AND credits = 4",
          "AND instead of a union"),
+    ],
+    24: [
+        (E, "SELECT s.name, COUNT(*) FILTER (WHERE e.grade >= 2.0), COUNT(*) FILTER (WHERE e.grade < 2.0) FROM students s JOIN enrollments e ON e.student_id = s.id GROUP BY s.id, s.name",
+         "FILTER counts; every group has at least one enrollment, so the CASE sums are never NULL"),
+        (N, "SELECT s.name, SUM(CASE WHEN e.grade >= 2.0 THEN 1 END), SUM(CASE WHEN e.grade < 2.0 THEN 1 END) FROM students s JOIN enrollments e ON e.student_id = s.id GROUP BY s.id, s.name",
+         "without ELSE 0 a student with no passes gets NULL instead of 0"),
+        (N, "SELECT s.name, SUM(CASE WHEN e.grade >= 2.0 THEN 1 ELSE 0 END), SUM(CASE WHEN e.grade >= 2.0 THEN 0 ELSE 1 END) FROM students s JOIN enrollments e ON e.student_id = s.id GROUP BY s.id, s.name",
+         "ungraded enrollments fall into ELSE and are counted as failed"),
+        (N, "SELECT s.name, SUM((e.grade >= 2.0)::int), SUM((e.grade < 2.0)::int) FROM students s JOIN enrollments e ON e.student_id = s.id GROUP BY s.id, s.name",
+         "a student whose enrollments are all ungraded gets NULL instead of 0"),
+    ],
+    25: [
+        (N, "SELECT DISTINCT ON (i.department_id) i.department_id, i.name, i.salary FROM instructors i ORDER BY i.department_id, i.salary DESC, i.id",
+         "DESC sorts NULLs first by default, so an instructor with no salary wins"),
+        (E, "SELECT department_id, name, salary FROM (SELECT department_id, name, salary, ROW_NUMBER() OVER (PARTITION BY department_id ORDER BY salary DESC NULLS LAST, id) AS rn FROM instructors) t WHERE rn = 1 ORDER BY department_id",
+         "ROW_NUMBER with the same ordering, ordered by department like the target"),
+        (E, "SELECT d.id, x.name, x.salary FROM departments d CROSS JOIN LATERAL (SELECT name, salary FROM instructors i WHERE i.department_id = d.id ORDER BY salary DESC NULLS LAST, id LIMIT 1) x ORDER BY d.id",
+         "LATERAL top-1 per department; departments without instructors produce no row"),
+        (N, "SELECT DISTINCT ON (i.department_id) i.department_id, i.name, i.salary FROM instructors i ORDER BY i.department_id, i.salary DESC NULLS LAST, i.id DESC",
+         "ties go to the highest instructor id"),
     ],
 }

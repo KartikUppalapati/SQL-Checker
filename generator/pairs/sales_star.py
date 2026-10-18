@@ -9,6 +9,10 @@ PAIRS = {
          "target is ordered by year; prediction is unordered"),
         (N, "SELECT d.year, SUM(f.quantity) * SUM(f.unit_price) FROM fact_sales f JOIN dim_date d ON d.date_key = f.date_key GROUP BY d.year ORDER BY d.year",
          "product of sums is not sum of products"),
+        (E, "SELECT d.year, SUM(f.quantity * f.unit_price) FROM fact_sales f JOIN dim_date d ON d.date_key = f.date_key GROUP BY d.year ORDER BY d.year ASC NULLS LAST",
+         "year is NOT NULL"),
+        (N, "SELECT EXTRACT(YEAR FROM d.full_date), SUM(f.quantity * f.unit_price) FROM fact_sales f JOIN dim_date d ON d.date_key = f.date_key GROUP BY 1 ORDER BY 1",
+         "year and full_date are independent columns; no constraint ties them together"),
     ],
     2: [
         (E, "SELECT st.region, SUM(fs.quantity * fs.unit_price) FROM dim_store st JOIN fact_sales fs ON fs.store_key = st.store_key JOIN dim_date dd ON dd.date_key = fs.date_key WHERE dd.quarter = 4 AND dd.year = 2024 GROUP BY st.region",
@@ -17,6 +21,8 @@ PAIRS = {
          "quarter and month are independent columns; no constraint ties them together"),
         (N, "SELECT s.region, SUM(f.quantity * f.unit_price) FROM fact_sales f JOIN dim_date d ON d.date_key = f.date_key JOIN dim_store s ON s.store_key = f.store_key WHERE d.year = 2024 OR d.quarter = 4 GROUP BY s.region",
          "OR instead of AND"),
+        (E, "SELECT s.region, SUM(f.quantity * f.unit_price) FROM fact_sales f JOIN dim_date d ON d.date_key = f.date_key JOIN dim_store s ON s.store_key = f.store_key WHERE (d.year, d.quarter) = (2024, 4) GROUP BY s.region",
+         "row-value comparison"),
     ],
     3: [
         (E, "SELECT p.name, SUM(f.quantity) FROM dim_product p JOIN fact_sales f ON f.product_key = p.product_key JOIN dim_date d ON d.date_key = f.date_key AND d.year = 2023 GROUP BY p.product_key, p.name ORDER BY SUM(f.quantity) DESC LIMIT 5",
@@ -29,6 +35,10 @@ PAIRS = {
          "LIMIT without ORDER BY returns 5 arbitrary products"),
         (E, "SELECT p.name, SUM(f.quantity) FROM fact_sales f JOIN dim_product p ON p.product_key = f.product_key JOIN dim_date d ON d.date_key = f.date_key WHERE d.year = 2023 GROUP BY p.product_key, p.name ORDER BY SUM(f.quantity) DESC LIMIT 5",
          "ORDER BY the aggregate instead of its alias"),
+        (E, "SELECT p.name, SUM(f.quantity) AS units FROM fact_sales f JOIN dim_product p ON p.product_key = f.product_key JOIN dim_date d ON d.date_key = f.date_key WHERE d.year = 2023 GROUP BY p.product_key, p.name ORDER BY units DESC NULLS LAST LIMIT 5",
+         "SUM of a NOT NULL column over a non-empty group is never NULL"),
+        (N, "SELECT p.name, SUM(f.quantity) AS units FROM fact_sales f JOIN dim_product p ON p.product_key = f.product_key JOIN dim_date d ON d.date_key = f.date_key WHERE d.year = 2023 GROUP BY p.product_key, p.name ORDER BY units DESC FETCH FIRST 5 ROWS WITH TIES",
+         "WITH TIES returns extra rows when fifth place is tied"),
     ],
     4: [
         (E, "SELECT d.is_weekend, SUM(f.quantity * f.unit_price) FROM fact_sales f JOIN dim_date d USING (date_key) GROUP BY 1",
@@ -37,6 +47,12 @@ PAIRS = {
          "text labels instead of the flag values"),
         (N, "SELECT d.day_of_week, SUM(f.quantity * f.unit_price) FROM fact_sales f JOIN dim_date d ON d.date_key = f.date_key GROUP BY d.day_of_week",
          "per weekday, not weekend vs weekday"),
+        (E, "SELECT d.is_weekend, SUM(f.quantity * f.unit_price) FROM fact_sales f JOIN dim_date d ON d.date_key = f.date_key GROUP BY GROUPING SETS ((d.is_weekend))",
+         "a single grouping set is a plain GROUP BY"),
+        (N, "SELECT d.is_weekend, SUM(f.quantity * f.unit_price) FROM fact_sales f JOIN dim_date d ON d.date_key = f.date_key GROUP BY ROLLUP (d.is_weekend)",
+         "ROLLUP adds a grand-total row"),
+        (E, "SELECT x.is_weekend, SUM(x.rev) FROM (SELECT d.is_weekend, f.quantity * f.unit_price AS rev FROM fact_sales f JOIN dim_date d ON d.date_key = f.date_key) x GROUP BY x.is_weekend",
+         "derived table computes the line amount"),
     ],
     5: [
         (E, "SELECT SUM(quantity * unit_price) - COALESCE(SUM(discount_amount), 0) FROM fact_sales",
@@ -45,6 +61,10 @@ PAIRS = {
          "rows with a NULL discount drop out of the sum entirely"),
         (N, "SELECT SUM(quantity * (unit_price - COALESCE(discount_amount, 0))) FROM fact_sales",
          "applies the discount per unit instead of per sale"),
+        (N, "SELECT SUM(quantity * unit_price) - SUM(discount_amount) FROM fact_sales",
+         "if no sale has a discount, SUM(discount_amount) is NULL and so is the result"),
+        (E, "SELECT SUM(quantity * unit_price - CASE WHEN discount_amount IS NULL THEN 0 ELSE discount_amount END) FROM fact_sales",
+         "CASE spelled-out COALESCE"),
     ],
     6: [
         (E, "SELECT COUNT(*) - COUNT(customer_key) FROM fact_sales",
@@ -55,6 +75,10 @@ PAIRS = {
          "returns NULL instead of 0 on an empty fact table"),
         (E, "SELECT COUNT(*) FROM fact_sales WHERE customer_key IS NULL LIMIT 1",
          "an aggregate without GROUP BY returns exactly one row, so LIMIT 1 changes nothing"),
+        (E, "SELECT COUNT(*) FILTER (WHERE customer_key IS NULL) FROM fact_sales",
+         "FILTER instead of WHERE; both return 0 on an empty table"),
+        (E, "SELECT COUNT(*) FROM fact_sales f LEFT JOIN dim_customer c ON c.customer_key = f.customer_key WHERE c.name IS NULL",
+         "a non-NULL customer_key always finds its customer (FK) and name is NOT NULL, so c.name is NULL exactly for anonymous sales"),
     ],
     7: [
         (E, "SELECT DISTINCT c.name FROM dim_customer c WHERE EXISTS (SELECT 1 FROM fact_sales f JOIN dim_store s ON s.store_key = f.store_key WHERE f.customer_key = c.customer_key AND s.city <> c.city)",
@@ -65,6 +89,10 @@ PAIRS = {
          "IS DISTINCT FROM also matches customers with a NULL city"),
         (E, "SELECT DISTINCT c.name FROM fact_sales f JOIN dim_customer c ON c.customer_key = f.customer_key JOIN dim_store s ON s.store_key = f.store_key WHERE NOT (c.city = s.city)",
          "NOT (a = b) is a <> b, NULL included"),
+        (N, "SELECT DISTINCT c.name FROM fact_sales f JOIN dim_customer c ON c.customer_key = f.customer_key JOIN dim_store s ON s.store_key = f.store_key WHERE c.city <> s.city OR c.city IS NULL",
+         "also returns customers with no city on file"),
+        (N, "SELECT DISTINCT c.name FROM fact_sales f JOIN dim_customer c ON c.customer_key = f.customer_key JOIN dim_store s ON s.store_key = f.store_key WHERE lower(c.city) <> lower(s.city)",
+         "cities that differ only in case no longer count as different"),
     ],
     8: [
         (E, "SELECT d.month, SUM(f.quantity * f.unit_price) FROM fact_sales f JOIN dim_product p ON p.product_key = f.product_key JOIN dim_date d ON d.date_key = f.date_key WHERE p.category = 'Electronics' AND d.year = 2024 GROUP BY 1 ORDER BY 1",
@@ -73,6 +101,10 @@ PAIRS = {
          "case-insensitive category match"),
         (N, "SELECT d.month, SUM(f.quantity * f.unit_price) AS r FROM fact_sales f JOIN dim_date d ON d.date_key = f.date_key JOIN dim_product p ON p.product_key = f.product_key WHERE d.year = 2024 AND p.category = 'Electronics' GROUP BY d.month ORDER BY r DESC",
          "ordered by revenue instead of month"),
+        (N, "SELECT d.month, SUM(f.quantity * f.unit_price) FROM fact_sales f JOIN dim_date d ON d.date_key = f.date_key JOIN dim_product p ON p.product_key = f.product_key WHERE d.full_date >= DATE '2024-01-01' AND d.full_date < DATE '2025-01-01' AND p.category = 'Electronics' GROUP BY d.month ORDER BY d.month",
+         "full_date and year are independent columns; no constraint ties them together"),
+        (E, "SELECT d.month, SUM(f.quantity * f.unit_price) FROM fact_sales f JOIN dim_date d ON d.date_key = f.date_key WHERE d.year = 2024 AND f.product_key IN (SELECT product_key FROM dim_product WHERE category = 'Electronics') GROUP BY d.month ORDER BY d.month",
+         "semi-join against the product dimension"),
     ],
     9: [
         (E, "SELECT s.name, AVG(f.quantity) FROM dim_store s JOIN fact_sales f USING (store_key) GROUP BY s.store_key, s.name",
@@ -81,12 +113,16 @@ PAIRS = {
          "stores sharing a name are merged"),
         (N, "SELECT s.name, SUM(f.quantity) / COUNT(*) FROM fact_sales f JOIN dim_store s ON s.store_key = f.store_key GROUP BY s.store_key, s.name",
          "integer division truncates the average"),
+        (N, "SELECT s.name, AVG(f.quantity)::int FROM fact_sales f JOIN dim_store s ON s.store_key = f.store_key GROUP BY s.store_key, s.name",
+         "rounds the average to an integer"),
     ],
     10: [
         (E, "SELECT p.category, SUM(f.is_promo) * 100.0 / COUNT(*) FROM fact_sales f JOIN dim_product p ON p.product_key = f.product_key GROUP BY p.category",
          "multiplication commuted, still numeric before the division"),
         (N, "SELECT p.category, 100 * SUM(f.is_promo) / COUNT(*) FROM fact_sales f JOIN dim_product p ON p.product_key = f.product_key GROUP BY p.category",
          "integer division"),
+        (N, "SELECT p.category, 100.0 * COUNT(*) FILTER (WHERE f.is_promo = 1) / COUNT(*) FROM fact_sales f JOIN dim_product p ON p.product_key = f.product_key GROUP BY p.category",
+         "CHECK constraints are not part of the equivalence definition: a value outside the CHECK list would make these differ"),
     ],
     11: [
         (E, "SELECT sku FROM dim_product WHERE product_key NOT IN (SELECT product_key FROM fact_sales)",
@@ -95,6 +131,10 @@ PAIRS = {
          "LEFT JOIN anti-join on the fact PK"),
         (N, "SELECT sku FROM dim_product WHERE is_discontinued = 1",
          "discontinued is not the same as never sold"),
+        (E, "SELECT sku FROM dim_product EXCEPT SELECT p.sku FROM dim_product p JOIN fact_sales f ON f.product_key = p.product_key",
+         "EXCEPT is safe: sku is UNIQUE NOT NULL"),
+        (N, "SELECT sku FROM dim_product WHERE product_key NOT IN (SELECT product_key FROM fact_sales WHERE is_return = 0)",
+         "products that only appear in returns count as never sold"),
     ],
     12: [
         (E, "SELECT c.is_loyalty_member, AVG(f.unit_price * f.quantity) FROM dim_customer c JOIN fact_sales f ON c.customer_key = f.customer_key GROUP BY c.is_loyalty_member",
@@ -103,6 +143,8 @@ PAIRS = {
          "anonymous sales form an extra NULL group"),
         (N, "SELECT c.is_loyalty_member, AVG(t.spend) FROM dim_customer c JOIN (SELECT customer_key, SUM(quantity * unit_price) AS spend FROM fact_sales GROUP BY customer_key) t ON t.customer_key = c.customer_key GROUP BY c.is_loyalty_member",
          "average per customer instead of per sale"),
+        (E, "SELECT c.is_loyalty_member, AVG(f.quantity * f.unit_price) FROM fact_sales f LEFT JOIN dim_customer c ON c.customer_key = f.customer_key WHERE f.customer_key IS NOT NULL GROUP BY c.is_loyalty_member",
+         "once anonymous sales are dropped, every sale finds its customer through the FK, so the LEFT JOIN is an inner join"),
     ],
     13: [
         (E, """SELECT s.name, SUM(f.quantity * f.unit_price)
@@ -129,6 +171,20 @@ WHERE r.revenue > (SELECT AVG(quantity * unit_price) FROM fact_sales)""",
 SELECT s.name, r.revenue FROM store_rev r JOIN dim_store s ON s.store_key = r.store_key
 WHERE r.revenue >= (SELECT AVG(revenue) FROM store_rev)""",
          ">= includes stores exactly at the average"),
+        (E, """WITH store_rev AS (
+    SELECT f.store_key, SUM(f.quantity * f.unit_price) AS revenue
+    FROM fact_sales f JOIN dim_date d ON d.date_key = f.date_key
+    WHERE d.year = 2024 GROUP BY f.store_key)
+SELECT s.name, r.revenue FROM (SELECT store_key, revenue, AVG(revenue) OVER () AS avg_rev FROM store_rev) r JOIN dim_store s ON s.store_key = r.store_key
+WHERE r.revenue > r.avg_rev""",
+         "average over a window instead of a scalar subquery"),
+        (N, """WITH store_rev AS (
+    SELECT f.store_key, SUM(f.quantity * f.unit_price) AS revenue
+    FROM fact_sales f JOIN dim_date d ON d.date_key = f.date_key
+    WHERE d.year = 2024 GROUP BY f.store_key)
+SELECT s.name, r.revenue FROM store_rev r JOIN dim_store s ON s.store_key = r.store_key
+WHERE r.revenue > (SELECT AVG(COALESCE(r2.revenue, 0)) FROM dim_store s2 LEFT JOIN store_rev r2 ON r2.store_key = s2.store_key)""",
+         "stores without 2024 sales count as 0 and pull the average down"),
     ],
     14: [
         (E, """WITH y AS (
@@ -144,6 +200,16 @@ FROM fact_sales f JOIN dim_date d ON d.date_key = f.date_key GROUP BY d.year ORD
        SUM(f.quantity * f.unit_price) - LAG(SUM(f.quantity * f.unit_price)) OVER (ORDER BY d.year)
 FROM fact_sales f JOIN dim_date d ON d.date_key = f.date_key GROUP BY d.year""",
          "target is ordered; prediction is not"),
+        (E, """WITH y AS (
+    SELECT d.year, SUM(f.quantity * f.unit_price) AS rev
+    FROM fact_sales f JOIN dim_date d ON d.date_key = f.date_key GROUP BY d.year)
+SELECT year, rev, rev - LAG(rev, 1) OVER (ORDER BY year) FROM y ORDER BY year""",
+         "explicit LAG offset of 1"),
+        (N, """WITH y AS (
+    SELECT d.year, SUM(f.quantity * f.unit_price) AS rev
+    FROM fact_sales f JOIN dim_date d ON d.date_key = f.date_key GROUP BY d.year)
+SELECT year, rev, rev - LAG(rev, 1, 0) OVER (ORDER BY year) FROM y ORDER BY year""",
+         "default 0: the first year's change is its full revenue instead of NULL"),
     ],
     15: [
         (E, "SELECT s.country, COUNT(DISTINCT c.customer_key) FROM fact_sales f JOIN dim_store s ON s.store_key = f.store_key LEFT JOIN dim_customer c ON c.customer_key = f.customer_key GROUP BY s.country",
@@ -152,6 +218,10 @@ FROM fact_sales f JOIN dim_date d ON d.date_key = f.date_key GROUP BY d.year""",
          "counts sales with a customer, not distinct customers"),
         (N, "SELECT c.country, COUNT(DISTINCT f.customer_key) FROM fact_sales f JOIN dim_customer c ON c.customer_key = f.customer_key GROUP BY c.country",
          "generic column: customer's country instead of store's country"),
+        (E, "SELECT t.country, COUNT(t.customer_key) FROM (SELECT DISTINCT s.country, f.customer_key FROM fact_sales f JOIN dim_store s ON s.store_key = f.store_key) t GROUP BY t.country",
+         "count over distinct (country, customer) pairs; the NULL customer is not counted"),
+        (N, "SELECT t.country, COUNT(*) FROM (SELECT DISTINCT s.country, f.customer_key FROM fact_sales f JOIN dim_store s ON s.store_key = f.store_key) t GROUP BY t.country",
+         "anonymous sales count as one extra customer"),
     ],
     16: [
         (E, "SELECT p.brand, AVG(f.is_return) FROM fact_sales f JOIN dim_product p ON p.product_key = f.product_key GROUP BY p.brand",
@@ -160,6 +230,8 @@ FROM fact_sales f JOIN dim_date d ON d.date_key = f.date_key GROUP BY d.year""",
          "integer division"),
         (N, "SELECT p.brand, AVG(f.is_return::numeric) FROM fact_sales f JOIN dim_product p ON p.product_key = f.product_key WHERE p.brand IS NOT NULL GROUP BY p.brand",
          "drops the no-brand group"),
+        (N, "SELECT COALESCE(p.brand, 'Unknown'), AVG(f.is_return::numeric) FROM fact_sales f JOIN dim_product p ON p.product_key = f.product_key GROUP BY 1",
+         "labels the no-brand group 'Unknown' and merges it with a real brand of that name"),
     ],
     17: [
         (E, "SELECT COUNT(*) FROM fact_sales WHERE date_key IN (SELECT date_key FROM dim_date WHERE is_holiday = 1) AND store_key IN (SELECT store_key FROM dim_store WHERE is_flagship = 1)",
@@ -168,6 +240,8 @@ FROM fact_sales f JOIN dim_date d ON d.date_key = f.date_key GROUP BY d.year""",
          "OR instead of AND"),
         (N, "SELECT COUNT(DISTINCT f.date_key) FROM fact_sales f JOIN dim_date d ON d.date_key = f.date_key JOIN dim_store s ON s.store_key = f.store_key WHERE d.is_holiday = 1 AND s.is_flagship = 1",
          "counts days, not sales"),
+        (N, "SELECT SUM(1) FROM fact_sales f JOIN dim_date d ON d.date_key = f.date_key JOIN dim_store s ON s.store_key = f.store_key WHERE d.is_holiday = 1 AND s.is_flagship = 1",
+         "SUM(1) is NULL instead of 0 when there are no such sales"),
     ],
     18: [
         (E, """WITH t AS (SELECT customer_key, SUM(quantity * unit_price) AS total FROM fact_sales GROUP BY customer_key)
@@ -179,6 +253,8 @@ SELECT c.name, t.total FROM t JOIN dim_customer c ON c.customer_key = t.customer
          "customers sharing a name are merged"),
         (N, "SELECT c.name, SUM(f.quantity * f.unit_price) AS spend FROM fact_sales f JOIN dim_customer c ON c.customer_key = f.customer_key GROUP BY c.customer_key, c.name HAVING SUM(f.quantity * f.unit_price) >= 10000 ORDER BY spend DESC",
          ">= includes customers who spent exactly 10000"),
+        (E, "SELECT c.name, SUM(f.quantity * f.unit_price) AS spend FROM fact_sales f JOIN dim_customer c ON c.customer_key = f.customer_key GROUP BY c.customer_key, c.name HAVING SUM(f.quantity * f.unit_price) > 1e4 ORDER BY spend DESC",
+         "1e4 is 10000"),
     ],
     19: [
         (E, "SELECT p.category, SUM(f.quantity * f.unit_price) - SUM(f.quantity * p.unit_cost) FROM fact_sales f JOIN dim_product p ON p.product_key = f.product_key WHERE p.unit_cost IS NOT NULL GROUP BY p.category",
@@ -187,6 +263,10 @@ SELECT c.name, t.total FROM t JOIN dim_customer c ON c.customer_key = t.customer
          "without the filter, categories whose products all lack a cost appear with NULL"),
         (N, "SELECT p.category, SUM(f.unit_price - p.unit_cost) FROM fact_sales f JOIN dim_product p ON p.product_key = f.product_key WHERE p.unit_cost IS NOT NULL GROUP BY p.category",
          "ignores quantity"),
+        (E, "SELECT p.category, SUM(f.quantity * f.unit_price - f.quantity * p.unit_cost) FROM fact_sales f JOIN dim_product p ON p.product_key = f.product_key WHERE p.unit_cost IS NOT NULL GROUP BY p.category",
+         "multiplication distributed over the difference"),
+        (N, "SELECT p.category, SUM(f.quantity * (f.unit_price - COALESCE(p.unit_cost, 0))) FROM fact_sales f JOIN dim_product p ON p.product_key = f.product_key GROUP BY p.category",
+         "products without a cost count as pure margin"),
     ],
     20: [
         (E, "SELECT DISTINCT s.name FROM dim_store s WHERE EXISTS (SELECT 1 FROM fact_sales f JOIN dim_product p ON p.product_key = f.product_key JOIN dim_date d ON d.date_key = f.date_key WHERE f.store_key = s.store_key AND p.is_discontinued = 1 AND d.year = 2024)",
@@ -195,6 +275,10 @@ SELECT c.name, t.total FROM t JOIN dim_customer c ON c.customer_key = t.customer
          "without DISTINCT, two stores with the same name produce the name twice"),
         (N, "SELECT DISTINCT s.name FROM fact_sales f JOIN dim_store s ON s.store_key = f.store_key JOIN dim_product p ON p.product_key = f.product_key JOIN dim_date d ON d.date_key = f.date_key WHERE p.is_discontinued = 0 AND d.year = 2024",
          "active products instead of discontinued"),
+        (E, "SELECT s.name FROM fact_sales f JOIN dim_store s ON s.store_key = f.store_key JOIN dim_product p ON p.product_key = f.product_key JOIN dim_date d ON d.date_key = f.date_key WHERE p.is_discontinued = 1 AND d.year = 2024 GROUP BY s.name",
+         "GROUP BY name is DISTINCT name"),
+        (N, "SELECT s.name FROM fact_sales f JOIN dim_store s ON s.store_key = f.store_key JOIN dim_product p ON p.product_key = f.product_key JOIN dim_date d ON d.date_key = f.date_key WHERE p.is_discontinued = 1 AND d.year = 2024 GROUP BY s.store_key, s.name",
+         "one row per store, so a name shared by several stores repeats"),
     ],
     21: [
         (E, "SELECT name FROM dim_customer WHERE customer_key NOT IN (SELECT customer_key FROM fact_sales WHERE customer_key IS NOT NULL)",
@@ -207,6 +291,8 @@ SELECT c.name, t.total FROM t JOIN dim_customer c ON c.customer_key = t.customer
          "EXCEPT on names: customer name is not unique, and duplicates are removed"),
         (N, "SELECT c.name FROM dim_customer c LEFT JOIN fact_sales f ON f.customer_key = c.customer_key WHERE f.customer_key = NULL",
          "= NULL is never true"),
+        (E, "SELECT name FROM dim_customer WHERE customer_key <> ALL (SELECT customer_key FROM fact_sales WHERE customer_key IS NOT NULL)",
+         "<> ALL is NOT IN; NULLs are filtered out"),
     ],
     22: [
         (N, "SELECT f.product_key FROM fact_sales f JOIN dim_date d ON d.date_key = f.date_key WHERE d.year = 2024 UNION ALL SELECT product_key FROM dim_product WHERE is_discontinued = 1",
@@ -231,5 +317,45 @@ SELECT c.name, t.total FROM t JOIN dim_customer c ON c.customer_key = t.customer
          "columns swapped"),
         (N, "SELECT COUNT(*), (SELECT COUNT(*) FROM fact_sales) FROM fact_sales WHERE discount_amount > 0",
          "a recorded discount of 0 is not counted"),
+    ],
+    24: [
+        (E, "SELECT d.month, SUM(f.quantity * f.unit_price), SUM(SUM(f.quantity * f.unit_price)) OVER (ORDER BY d.month) FROM fact_sales f JOIN dim_date d ON d.date_key = f.date_key WHERE d.year = 2024 GROUP BY d.month ORDER BY d.month",
+         "the default RANGE frame equals ROWS here: each month is one row, so no row has peers"),
+        (E, "SELECT d.month, SUM(f.quantity * f.unit_price), SUM(SUM(f.quantity * f.unit_price)) OVER (ORDER BY d.month ROWS UNBOUNDED PRECEDING) FROM fact_sales f JOIN dim_date d ON d.date_key = f.date_key WHERE d.year = 2024 GROUP BY d.month ORDER BY d.month",
+         "a frame with only a start ends at CURRENT ROW"),
+        (N, "SELECT d.month, SUM(f.quantity * f.unit_price), SUM(SUM(f.quantity * f.unit_price)) OVER () FROM fact_sales f JOIN dim_date d ON d.date_key = f.date_key WHERE d.year = 2024 GROUP BY d.month ORDER BY d.month",
+         "the full-year total on every row"),
+        (N, "SELECT d.month, SUM(f.quantity * f.unit_price), SUM(SUM(f.quantity * f.unit_price)) OVER (ORDER BY d.month ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM fact_sales f JOIN dim_date d ON d.date_key = f.date_key WHERE d.year = 2024 GROUP BY d.month ORDER BY d.month",
+         "two-month sum instead of year to date"),
+    ],
+    25: [
+        (E, """SELECT store, product, units FROM (
+    SELECT s.name AS store, p.name AS product, SUM(f.quantity) AS units,
+           ROW_NUMBER() OVER (PARTITION BY s.store_key ORDER BY SUM(f.quantity) DESC, p.product_key) AS rn
+    FROM fact_sales f
+    JOIN dim_store s ON s.store_key = f.store_key
+    JOIN dim_product p ON p.product_key = f.product_key
+    GROUP BY s.store_key, s.name, p.product_key, p.name) x
+WHERE rn <= 3""",
+         "ROW_NUMBER per store; stores without sales are dropped by both"),
+        (E, """SELECT store, product, units FROM (
+    SELECT s.name AS store, p.name AS product, SUM(f.quantity) AS units,
+           RANK() OVER (PARTITION BY s.store_key ORDER BY SUM(f.quantity) DESC, p.product_key) AS rn
+    FROM fact_sales f
+    JOIN dim_store s ON s.store_key = f.store_key
+    JOIN dim_product p ON p.product_key = f.product_key
+    GROUP BY s.store_key, s.name, p.product_key, p.name) x
+WHERE rn <= 3""",
+         "RANK equals ROW_NUMBER: product_key is unique within a store, so there are no ties"),
+        (N, """SELECT s.name, t.name, t.units FROM dim_store s
+CROSS JOIN LATERAL (
+    SELECT p.name, SUM(f.quantity) AS units FROM fact_sales f JOIN dim_product p ON p.product_key = f.product_key
+    WHERE f.store_key = s.store_key GROUP BY p.product_key, p.name ORDER BY units DESC LIMIT 3) t""",
+         "missing tie-break: ties at third place can select different products"),
+        (N, """SELECT s.name, t.name, t.units FROM dim_store s
+LEFT JOIN LATERAL (
+    SELECT p.product_key, p.name, SUM(f.quantity) AS units FROM fact_sales f JOIN dim_product p ON p.product_key = f.product_key
+    WHERE f.store_key = s.store_key GROUP BY p.product_key, p.name ORDER BY units DESC, p.product_key LIMIT 3) t ON TRUE""",
+         "LEFT JOIN LATERAL keeps stores without sales, with NULLs"),
     ],
 }

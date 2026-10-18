@@ -9,6 +9,10 @@ PAIRS = {
          "sections with no views appear with 0"),
         (N, "SELECT p.section, COUNT(*) FROM factPageView v JOIN dimPage p ON p.pageKey = v.pageKey GROUP BY p.section",
          "INVALID: unquoted factPageView folds to factpageview, which does not exist"),
+        (E, 'SELECT p."section", COUNT(*) FROM "dimPage" p JOIN "factPageView" v USING ("pageKey") GROUP BY 1',
+         "USING join"),
+        (N, 'SELECT p."section", COUNT(*) FROM "factPageView" v JOIN "dimPage" p ON p."pageKey" = v."pageKey" GROUP BY ROLLUP (p."section")',
+         "ROLLUP adds a grand-total row"),
     ],
     2: [
         (E, '''SELECT vi."deviceType", SUM(v."isBounce") * 100.0 / COUNT(*) FROM "dimVisitor" vi JOIN "factPageView" v ON v."visitorKey" = vi."visitorKey" GROUP BY vi."deviceType"''',
@@ -17,6 +21,8 @@ PAIRS = {
          "integer division"),
         (N, '''SELECT vi."deviceType", AVG(v."isBounce") FROM "factPageView" v JOIN "dimVisitor" vi ON vi."visitorKey" = v."visitorKey" GROUP BY vi."deviceType"''',
          "fraction instead of percentage"),
+        (N, 'SELECT vi."deviceType", 100.0 * COUNT(*) FILTER (WHERE v."isBounce" = 1) / COUNT(*) FROM "factPageView" v JOIN "dimVisitor" vi ON vi."visitorKey" = v."visitorKey" GROUP BY vi."deviceType"',
+         "CHECK constraints are not part of the equivalence definition: a value outside the CHECK list would make these differ"),
     ],
     3: [
         (E, '''SELECT p."url", AVG(v."durationMs" / 1000.0) FROM "dimPage" p JOIN "factPageView" v ON v."pageKey" = p."pageKey" AND v."durationMs" IS NOT NULL GROUP BY p."url"''',
@@ -25,6 +31,8 @@ PAIRS = {
          "integer division truncates each duration to whole seconds"),
         (N, '''SELECT p."url", AVG(v."durationMs" / 1000.0) FROM "factPageView" v JOIN "dimPage" p ON p."pageKey" = v."pageKey" GROUP BY p."url"''',
          "pages whose views are all unmeasured appear with NULL"),
+        (N, 'SELECT p."url", AVG(COALESCE(v."durationMs", 0) / 1000.0) FROM "factPageView" v JOIN "dimPage" p ON p."pageKey" = v."pageKey" GROUP BY p."url"',
+         "unmeasured views are averaged in as 0 seconds"),
     ],
     4: [
         (E, '''SELECT d."calendarDate", COUNT(DISTINCT v."sessionId") FROM "dimDate" d JOIN "factPageView" v ON v."dateKey" = d."dateKey" WHERE d."month" = 3 AND d."year" = 2024 GROUP BY 1''',
@@ -33,6 +41,10 @@ PAIRS = {
          "counts page views, not distinct sessions"),
         (N, '''SELECT d."calendarDate", COUNT(DISTINCT v."sessionId") FROM "factPageView" v JOIN "dimDate" d ON d."dateKey" = v."dateKey" WHERE d."month" = 3 GROUP BY d."calendarDate"''',
          "March of every year"),
+        (N, 'SELECT d."calendarDate", COUNT(DISTINCT v."sessionId") FROM "factPageView" v JOIN "dimDate" d ON d."dateKey" = v."dateKey" WHERE d."calendarDate" >= DATE \'2024-03-01\' AND d."calendarDate" < DATE \'2024-04-01\' GROUP BY d."calendarDate"',
+         "calendarDate and year/month are independent columns; no constraint ties them together"),
+        (E, 'SELECT d."calendarDate", COUNT(DISTINCT v."sessionId") FROM "factPageView" v JOIN "dimDate" d ON d."dateKey" = v."dateKey" WHERE (d."year", d."month") = (2024, 3) GROUP BY d."calendarDate"',
+         "row-value comparison"),
     ],
     5: [
         (E, '''SELECT COALESCE(c."channel", 'direct') AS ch, SUM(o."revenue") FROM "factOrder" o LEFT JOIN "dimCampaign" c ON o."campaignKey" = c."campaignKey" GROUP BY ch''',
@@ -43,6 +55,10 @@ PAIRS = {
          "adds ('direct', NULL) when there are no direct orders, and does not merge with a campaign whose channel is 'direct'"),
         (N, '''SELECT COALESCE(c."channel", 'Direct'), SUM(o."revenue") FROM "factOrder" o LEFT JOIN "dimCampaign" c ON c."campaignKey" = o."campaignKey" GROUP BY COALESCE(c."channel", 'Direct')''',
          "'Direct' is not 'direct'"),
+        (E, 'SELECT CASE WHEN c."channel" IS NULL THEN \'direct\' ELSE c."channel" END, SUM(o."revenue") FROM "factOrder" o LEFT JOIN "dimCampaign" c ON c."campaignKey" = o."campaignKey" GROUP BY 1',
+         "CASE spelled-out COALESCE"),
+        (N, 'SELECT ISNULL(c."channel", \'direct\'), SUM(o."revenue") FROM "factOrder" o LEFT JOIN "dimCampaign" c ON c."campaignKey" = o."campaignKey" GROUP BY 1',
+         "INVALID: two-argument ISNULL is SQL Server; PostgreSQL has no such function"),
     ],
     6: [
         (E, '''SELECT "visitorKey" FROM "factPageView" EXCEPT SELECT "visitorKey" FROM "factOrder"''',
@@ -51,6 +67,8 @@ PAIRS = {
          "one row per page view (no DISTINCT)"),
         (N, '''SELECT "visitorKey" FROM "dimVisitor" EXCEPT SELECT "visitorKey" FROM "factOrder"''',
          "includes visitors with no page views"),
+        (E, 'SELECT v."visitorKey" FROM "factPageView" v LEFT JOIN "factOrder" o ON o."visitorKey" = v."visitorKey" WHERE o."orderId" IS NULL GROUP BY v."visitorKey"',
+         "LEFT JOIN anti-join; GROUP BY instead of DISTINCT"),
     ],
     7: [
         (E, '''SELECT c."name" FROM "dimCampaign" c WHERE NOT EXISTS (SELECT 1 FROM "factPageView" v WHERE v."campaignKey" = c."campaignKey")''',
@@ -59,6 +77,10 @@ PAIRS = {
          "NOT IN with NULLs filtered out"),
         (N, '''SELECT "name" FROM "dimCampaign" WHERE "campaignKey" NOT IN (SELECT "campaignKey" FROM "factPageView")''',
          "NOT IN over a nullable column: any organic view makes the result empty"),
+        (E, 'SELECT c."name" FROM "dimCampaign" c WHERE c."campaignKey" <> ALL (SELECT "campaignKey" FROM "factPageView" WHERE "campaignKey" IS NOT NULL)',
+         "<> ALL is NOT IN; NULLs filtered out"),
+        (E, 'SELECT c."name" FROM "factPageView" v RIGHT JOIN "dimCampaign" c ON v."campaignKey" = c."campaignKey" WHERE v."viewId" IS NULL',
+         "RIGHT JOIN with the tables swapped"),
     ],
     8: [
         (E, '''SELECT p."url", COUNT(*) FROM "factPageView" v JOIN "dimDate" d ON d."dateKey" = v."dateKey" JOIN "dimPage" p ON p."pageKey" = v."pageKey" WHERE d."isWeekend" = 1 AND p."isLandingPage" = 1 GROUP BY p."url" ORDER BY COUNT(*) DESC LIMIT 10''',
@@ -69,6 +91,8 @@ PAIRS = {
          "all pages, not just landing pages"),
         (N, '''SELECT p."url", COUNT(*) AS views FROM "factPageView" v JOIN "dimPage" p ON p."pageKey" = v."pageKey" JOIN "dimDate" d ON d."dateKey" = v."dateKey" WHERE p."isLandingPage" = 1 AND d."isWeekend" = 1 GROUP BY p."url" LIMIT 10''',
          "LIMIT without ORDER BY returns 10 arbitrary landing pages"),
+        (N, 'SELECT p."url", COUNT(*) AS views FROM "factPageView" v JOIN "dimPage" p ON p."pageKey" = v."pageKey" JOIN "dimDate" d ON d."dateKey" = v."dateKey" WHERE p."isLandingPage" = 1 AND d."isWeekend" = 1 GROUP BY p."url" ORDER BY views DESC FETCH FIRST 10 ROWS WITH TIES',
+         "WITH TIES returns extra rows when tenth place is tied"),
     ],
     9: [
         (E, '''SELECT vi."country", COUNT(o."orderId") FROM "dimVisitor" vi JOIN "factOrder" o ON o."visitorKey" = vi."visitorKey" GROUP BY vi."country"''',
@@ -85,6 +109,8 @@ PAIRS = {
          "campaigns without a budget appear with NULL"),
         (N, '''SELECT c."name", c."budget" / SUM(o."revenue") FROM "dimCampaign" c JOIN "factOrder" o ON o."campaignKey" = c."campaignKey" WHERE c."budget" IS NOT NULL GROUP BY c."campaignKey", c."name", c."budget"''',
          "ratio inverted"),
+        (N, 'SELECT c."name", SUM(o."revenue") / NULLIF(c."budget", 0) FROM "dimCampaign" c JOIN "factOrder" o ON o."campaignKey" = c."campaignKey" WHERE c."budget" IS NOT NULL GROUP BY c."campaignKey", c."name", c."budget"',
+         "a zero budget raises division by zero in the target; this returns NULL"),
     ],
     11: [
         (E, '''WITH daily AS (SELECT d."calendarDate" AS day, COUNT(*) AS views FROM "factPageView" v JOIN "dimDate" d ON d."dateKey" = v."dateKey" GROUP BY d."calendarDate")
@@ -94,6 +120,12 @@ SELECT day, views, AVG(views) OVER (ORDER BY day ROWS 6 PRECEDING) FROM daily OR
          "8-row window"),
         (N, '''SELECT d."calendarDate", COUNT(*), AVG(COUNT(*)) OVER (ORDER BY d."calendarDate" RANGE BETWEEN INTERVAL '6 days' PRECEDING AND CURRENT ROW) FROM "factPageView" v JOIN "dimDate" d ON d."dateKey" = v."dateKey" GROUP BY d."calendarDate" ORDER BY d."calendarDate"''',
          "calendar-day window differs from 7 rows when some days have no views"),
+        (E, 'SELECT d."calendarDate", COUNT(*), AVG(COUNT(*)) OVER w FROM "factPageView" v JOIN "dimDate" d ON d."dateKey" = v."dateKey" GROUP BY d."calendarDate" WINDOW w AS (ORDER BY d."calendarDate" ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) ORDER BY d."calendarDate"',
+         "named WINDOW clause"),
+        (N, 'SELECT d."calendarDate", COUNT(*), AVG(COUNT(*)) OVER (ORDER BY d."calendarDate") FROM "factPageView" v JOIN "dimDate" d ON d."dateKey" = v."dateKey" GROUP BY d."calendarDate" ORDER BY d."calendarDate"',
+         "the default frame is cumulative from the first day"),
+        (N, 'SELECT d."calendarDate", COUNT(*), AVG(COUNT(*)) OVER (ORDER BY d."calendarDate" ROWS BETWEEN 3 PRECEDING AND 3 FOLLOWING) FROM "factPageView" v JOIN "dimDate" d ON d."dateKey" = v."dateKey" GROUP BY d."calendarDate" ORDER BY d."calendarDate"',
+         "centered window instead of trailing"),
     ],
     12: [
         (E, '''SELECT vi."isRegistered", AVG(o."revenue") FROM "dimVisitor" vi JOIN "factOrder" o ON o."visitorKey" = vi."visitorKey" GROUP BY 1''',
@@ -102,6 +134,8 @@ SELECT day, views, AVG(views) OVER (ORDER BY day ROWS 6 PRECEDING) FROM daily OR
          "only the registered group"),
         (N, '''SELECT vi."isRegistered", AVG(t.total) FROM "dimVisitor" vi JOIN (SELECT "visitorKey", SUM("revenue") AS total FROM "factOrder" GROUP BY "visitorKey") t ON t."visitorKey" = vi."visitorKey" GROUP BY vi."isRegistered"''',
          "average per visitor, not per order"),
+        (E, 'SELECT vi."isRegistered", SUM(o."revenue") / COUNT(*) FROM "factOrder" o JOIN "dimVisitor" vi ON vi."visitorKey" = o."visitorKey" GROUP BY vi."isRegistered"',
+         "revenue is NOT NULL, and AVG of a numeric column is its sum divided by the count"),
     ],
     13: [
         (E, '''SELECT p."url" FROM "dimPage" AS p WHERE p."title" IS NULL''',
@@ -118,6 +152,8 @@ SELECT day, views, AVG(views) OVER (ORDER BY day ROWS 6 PRECEDING) FROM daily OR
          "months with no first orders give NULL instead of 0"),
         (N, '''SELECT d."month", AVG(o."isFirstOrder") FROM "factOrder" o JOIN "dimDate" d ON d."dateKey" = o."dateKey" WHERE d."year" = 2024 GROUP BY d."month"''',
          "share of orders, not of revenue"),
+        (N, 'SELECT d."month", SUM(o."revenue" * o."isFirstOrder") / SUM(o."revenue") FROM "factOrder" o JOIN "dimDate" d ON d."dateKey" = o."dateKey" WHERE d."year" = 2024 GROUP BY d."month"',
+         "CHECK constraints are not part of the equivalence definition: a value outside the CHECK list would make these differ"),
     ],
     15: [
         (E, '''SELECT COUNT(*) FROM "dimVisitor" vi WHERE EXISTS (SELECT 1 FROM "factOrder" o JOIN "dimCampaign" c ON c."campaignKey" = o."campaignKey" WHERE o."visitorKey" = vi."visitorKey" AND o."isFirstOrder" = 1 AND c."channel" = 'email')''',
@@ -126,6 +162,8 @@ SELECT day, views, AVG(views) OVER (ORDER BY day ROWS 6 PRECEDING) FROM daily OR
          "counts orders, not distinct visitors"),
         (N, '''SELECT COUNT(DISTINCT o."visitorKey") FROM "factOrder" o JOIN "dimCampaign" c ON c."campaignKey" = o."campaignKey" WHERE o."isFirstOrder" = 1 AND c."channel" ILIKE '%email%\'''',
          "fuzzy channel match"),
+        (E, 'SELECT COUNT(*) FROM (SELECT DISTINCT o."visitorKey" FROM "factOrder" o JOIN "dimCampaign" c ON c."campaignKey" = o."campaignKey" WHERE o."isFirstOrder" = 1 AND c."channel" = \'email\') t',
+         "count of a DISTINCT derived table; visitorKey is NOT NULL"),
     ],
     16: [
         (E, '''SELECT AVG(o."itemCount") FROM "factOrder" o WHERE o."dateKey" IN (SELECT "dateKey" FROM "dimDate" WHERE "isWeekend" = 0)''',
@@ -136,6 +174,8 @@ SELECT day, views, AVG(views) OVER (ORDER BY day ROWS 6 PRECEDING) FROM daily OR
          "integer division"),
         (E, '''SELECT AVG(o."itemCount") FROM "factOrder" o JOIN "dimDate" d ON d."dateKey" = o."dateKey" WHERE d."isWeekend" = 0 LIMIT 1''',
          "an aggregate without GROUP BY returns exactly one row, so LIMIT 1 changes nothing"),
+        (N, 'SELECT AVG(o."itemCount") FROM "factOrder" o WHERE o."dateKey" IN (SELECT "dateKey" FROM "dimDate" WHERE "isWeekend" <> 1)',
+         "CHECK constraints are not part of the equivalence definition: a value outside the CHECK list would make these differ"),
     ],
     17: [
         (E, '''SELECT "name", "startDate" FROM "dimCampaign" WHERE "endDate" IS NULL AND EXTRACT(YEAR FROM "startDate") = 2024 ORDER BY "startDate" DESC''',
@@ -144,6 +184,10 @@ SELECT day, views, AVG(views) OVER (ORDER BY day ROWS 6 PRECEDING) FROM daily OR
          "target is ordered; prediction is not"),
         (N, '''SELECT "name", "startDate" FROM "dimCampaign" WHERE "endDate" IS NULL AND "startDate" BETWEEN '2024-01-01' AND '2025-01-01' ORDER BY "startDate" DESC''',
          "BETWEEN includes Jan 1, 2025"),
+        (E, 'SELECT "name", "startDate" FROM "dimCampaign" WHERE "endDate" IS NULL AND "startDate" >= DATE \'2024-01-01\' AND "startDate" < DATE \'2024-01-01\' + INTERVAL \'1 year\' ORDER BY "startDate" DESC NULLS LAST',
+         "date + interval is the start of 2025; startDate is NOT NULL"),
+        (N, 'SELECT "name", "startDate" FROM "dimCampaign" WHERE ("endDate" IS NULL OR "endDate" > CURRENT_DATE) AND "startDate" >= DATE \'2024-01-01\' AND "startDate" < DATE \'2025-01-01\' ORDER BY "startDate" DESC',
+         "also counts campaigns with a future end date as running"),
     ],
     18: [
         (E, '''SELECT vi."deviceType", COUNT(v."viewId") / COUNT(DISTINCT vi."visitorKey") FROM "factPageView" v JOIN "dimVisitor" vi ON vi."visitorKey" = v."visitorKey" GROUP BY vi."deviceType"''',
@@ -160,6 +204,8 @@ SELECT day, views, AVG(views) OVER (ORDER BY day ROWS 6 PRECEDING) FROM daily OR
          "CASE sums (groups are never empty)"),
         (N, '''SELECT p."section" FROM "factPageView" v JOIN "dimPage" p ON p."pageKey" = v."pageKey" GROUP BY p."section" HAVING COUNT(*) FILTER (WHERE v."campaignKey" IS NULL) >= COUNT(*) FILTER (WHERE v."campaignKey" IS NOT NULL)''',
          ">= includes ties"),
+        (E, 'SELECT p."section" FROM "factPageView" v JOIN "dimPage" p ON p."pageKey" = v."pageKey" GROUP BY p."section" HAVING SUM(CASE WHEN v."campaignKey" IS NULL THEN 1 ELSE -1 END) > 0',
+         "organic minus campaign views is positive"),
     ],
     20: [
         (E, '''SELECT "url" FROM "dimPage" WHERE "pageKey" NOT IN (SELECT "pageKey" FROM "factPageView")''',
@@ -172,6 +218,8 @@ SELECT day, views, AVG(views) OVER (ORDER BY day ROWS 6 PRECEDING) FROM daily OR
          'INVALID: quoted "URL" is case-sensitive; the column is "url"'),
         (N, '''SELECT pg."url" FROM "dimPage" pg WHERE NOT EXISTS (SELECT 1 FROM "factPageView" v WHERE v."pageKey" = pg."pageKey" AND v."isBounce" = 0)''',
          "pages viewed only by bounces are included"),
+        (E, 'SELECT pg."url" FROM "factPageView" v RIGHT JOIN "dimPage" pg ON v."pageKey" = pg."pageKey" WHERE v."viewId" IS NULL',
+         "RIGHT JOIN anti-join on the view primary key"),
     ],
     21: [
         (N, '''SELECT v."visitorKey" FROM "factPageView" v JOIN "dimDate" d ON d."dateKey" = v."dateKey" WHERE d."year" = 2024 UNION ALL SELECT o."visitorKey" FROM "factOrder" o JOIN "dimDate" d ON d."dateKey" = o."dateKey" WHERE d."year" = 2024''',
@@ -182,6 +230,8 @@ SELECT day, views, AVG(views) OVER (ORDER BY day ROWS 6 PRECEDING) FROM daily OR
          "only visitors who both viewed and ordered"),
         (N, '''SELECT v."visitorKey" FROM "factPageView" v JOIN "dimDate" d ON d."dateKey" = v."dateKey" WHERE d."year" >= 2024 UNION SELECT o."visitorKey" FROM "factOrder" o JOIN "dimDate" d ON d."dateKey" = o."dateKey" WHERE d."year" >= 2024''',
          "includes activity after 2024"),
+        (E, 'SELECT DISTINCT x."visitorKey" FROM (SELECT "visitorKey", "dateKey" FROM "factPageView" UNION ALL SELECT "visitorKey", "dateKey" FROM "factOrder") x JOIN "dimDate" d ON d."dateKey" = x."dateKey" WHERE d."year" = 2024',
+         "filter applied once over the combined activity"),
     ],
     22: [
         (E, '''SELECT "name" FROM "dimCampaign" WHERE "campaignKey" NOT IN (SELECT "campaignKey" FROM "factOrder" WHERE "campaignKey" IS NOT NULL)''',
@@ -194,5 +244,27 @@ SELECT day, views, AVG(views) OVER (ORDER BY day ROWS 6 PRECEDING) FROM daily OR
          "<> ALL has the same NULL trap as NOT IN"),
         (N, '''SELECT "name" FROM "dimCampaign" EXCEPT SELECT c."name" FROM "dimCampaign" c JOIN "factOrder" o ON o."campaignKey" = c."campaignKey"''',
          "EXCEPT on names: campaign name is not unique, and duplicates are removed"),
+        (E, 'SELECT c."name" FROM "dimCampaign" c LEFT JOIN "factOrder" o ON o."campaignKey" = c."campaignKey" GROUP BY c."campaignKey", c."name" HAVING COUNT(o."orderId") = 0',
+         "no matched orders"),
+    ],
+    23: [
+        (N, 'SELECT CASE WHEN "durationMs" IS NULL THEN \'unmeasured\' WHEN "durationMs" < 10 THEN \'quick\' ELSE \'engaged\' END, COUNT(*) FROM "factPageView" GROUP BY 1',
+         "10 milliseconds, not 10 seconds"),
+        (N, 'SELECT CASE WHEN "durationMs" < 10000 THEN \'quick\' ELSE \'engaged\' END, COUNT(*) FROM "factPageView" GROUP BY 1',
+         "unmeasured views fall into ELSE and count as engaged"),
+        (E, 'SELECT CASE WHEN "durationMs" >= 10000 THEN \'engaged\' WHEN "durationMs" < 10000 THEN \'quick\' ELSE \'unmeasured\' END, COUNT(*) FROM "factPageView" GROUP BY 1',
+         "branches reordered; NULL fails both comparisons and reaches ELSE"),
+    ],
+    24: [
+        (N, 'SELECT DISTINCT ON ("visitorKey") "visitorKey", "orderId", "revenue" FROM "factOrder" ORDER BY "visitorKey", "dateKey", "orderId"',
+         "the yyyymmdd encoding of dateKey is a convention, not a constraint"),
+        (N, 'SELECT "visitorKey", "orderId", "revenue" FROM "factOrder" WHERE "isFirstOrder" = 1 ORDER BY "visitorKey"',
+         "the isFirstOrder flag is not constrained to agree with the dates"),
+        (E, '''SELECT "visitorKey", "orderId", "revenue" FROM (
+    SELECT o."visitorKey", o."orderId", o."revenue",
+           ROW_NUMBER() OVER (PARTITION BY o."visitorKey" ORDER BY d."calendarDate", o."orderId") AS rn
+    FROM "factOrder" o JOIN "dimDate" d ON d."dateKey" = o."dateKey") t
+WHERE rn = 1 ORDER BY "visitorKey"''',
+         "ROW_NUMBER with the same ordering, ordered by visitor like the target"),
     ],
 }

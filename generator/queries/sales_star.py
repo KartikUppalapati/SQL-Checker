@@ -179,4 +179,29 @@ SELECT product_key FROM dim_product WHERE is_discontinued = 1""",
     ("How many sales have a discount recorded, and how many sales are there in total?",
      "SELECT COUNT(discount_amount) AS discounted, COUNT(*) AS total FROM fact_sales",
      ["star", "nullable"]),
+
+    ("For each month of 2024, show the revenue and the running total of revenue for the year so far, ordered by month.",
+     """SELECT d.month,
+       SUM(f.quantity * f.unit_price) AS revenue,
+       SUM(SUM(f.quantity * f.unit_price)) OVER (ORDER BY d.month ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_revenue
+FROM fact_sales f
+JOIN dim_date d ON d.date_key = f.date_key
+WHERE d.year = 2024
+GROUP BY d.month
+ORDER BY d.month""",
+     ['window_frame', 'star']),
+
+    ("For each store, list its 3 best-selling products by units sold, showing store name, product name and units. Break ties by product key.",
+     """SELECT s.name AS store, t.name AS product, t.units
+FROM dim_store s
+CROSS JOIN LATERAL (
+    SELECT p.product_key, p.name, SUM(f.quantity) AS units
+    FROM fact_sales f
+    JOIN dim_product p ON p.product_key = f.product_key
+    WHERE f.store_key = s.store_key
+    GROUP BY p.product_key, p.name
+    ORDER BY units DESC, p.product_key
+    LIMIT 3
+) t""",
+     ['lateral', 'top_k', 'star']),
 ]

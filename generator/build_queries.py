@@ -21,6 +21,7 @@ from sqlglot.schema import MappingSchema
 from generator import queries as queries_pkg
 from generator.schema_meta import SCHEMA_META
 from sqleval.schema import load_catalog, norm_ident
+from sqleval.validate import parse_tree
 
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMAS_DIR = ROOT / "dataset" / "schemas"
@@ -70,6 +71,7 @@ def validate_query(sql: str, schema: MappingSchema) -> exp.Expression:
     stmts = pglast.parse_sql(sql)
     if len(stmts) != 1 or type(stmts[0].stmt).__name__ != "SelectStmt":
         raise ValueError("target must be exactly one SELECT statement")
+    parse_tree(sql)  # the evaluator's own gate (e.g. functions PostgreSQL does not have)
     tree = sqlglot.parse_one(sql, read="postgres")
     cte_names = {norm_ident(c.args["alias"].this) for c in tree.find_all(exp.CTE)}
     for t in tree.find_all(exp.Table):

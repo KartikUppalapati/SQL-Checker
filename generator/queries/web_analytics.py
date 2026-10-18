@@ -162,4 +162,21 @@ WHERE d."year" = 2024""",
 FROM "dimCampaign" c
 WHERE NOT EXISTS (SELECT 1 FROM "factOrder" o WHERE o."campaignKey" = c."campaignKey")""",
      ["anti_join", "nullable", "star"]),
+
+    ("Bucket page views by measured duration: 'quick' under 10 seconds, 'engaged' at 10 seconds or more, and 'unmeasured' when no duration was recorded. Show the bucket and the number of views.",
+     """SELECT CASE WHEN "durationMs" IS NULL THEN 'unmeasured'
+            WHEN "durationMs" < 10000 THEN 'quick'
+            ELSE 'engaged'
+       END AS bucket,
+       COUNT(*) AS views
+FROM "factPageView"
+GROUP BY 1""",
+     ['case', 'nullable']),
+
+    ("For each visitor who placed an order, show their first order: visitor key, order id and revenue. 'First' means the earliest order date; break ties by the lowest order id.",
+     '''SELECT DISTINCT ON (o."visitorKey") o."visitorKey", o."orderId", o."revenue"
+FROM "factOrder" o
+JOIN "dimDate" d ON d."dateKey" = o."dateKey"
+ORDER BY o."visitorKey", d."calendarDate", o."orderId"''',
+     ['distinct_on']),
 ]

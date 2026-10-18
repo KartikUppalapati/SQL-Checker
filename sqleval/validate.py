@@ -8,6 +8,18 @@ class Invalid(Exception):
     """The prediction is not exactly one valid PostgreSQL query."""
 
 
+# Functions from other dialects that PostgreSQL does not have. The grammar accepts any function
+# name, and sqlglot quietly maps several of these (IFNULL, NVL, ...) onto PostgreSQL functions.
+FOREIGN_FUNCTIONS = frozenset({
+    "ifnull", "nvl", "nvl2", "isnull", "iif", "if", "nz", "isnumeric",
+    "dateadd", "datediff", "datepart", "datename", "getdate", "getutcdate", "sysdate", "sysdatetime",
+    "curdate", "curtime", "date_format", "str_to_date", "unix_timestamp", "from_unixtime", "strftime",
+    "julianday", "year", "month", "day", "dayofweek", "dayofmonth", "dayofyear", "weekday", "hour",
+    "minute", "second", "eomonth", "last_day", "add_months", "months_between",
+    "len", "charindex", "instr", "locate", "ucase", "lcase", "mid", "group_concat", "listagg",
+})
+
+
 def parse_tree(sql: str):
     """Parse with the PostgreSQL grammar; return the location-free parse tree of the single
     statement. Raises Invalid if the text is not exactly one SELECT (incl. VALUES / set ops / WITH)."""
@@ -22,7 +34,22 @@ def parse_tree(sql: str):
     stmt = stmts[0].get("stmt", {})
     if "SelectStmt" not in stmt:
         raise Invalid("not_a_query")
+    if any(name in FOREIGN_FUNCTIONS for name in _function_names(stmt)):
+        raise Invalid("unknown_function")
     return _normalize(stmt)
+
+
+def _function_names(o):
+    """Unqualified names of the function calls in a parse tree."""
+    if isinstance(o, dict):
+        f = o.get("FuncCall")
+        if f and len(f.get("funcname", [])) == 1:
+            yield f["funcname"][0].get("String", {}).get("sval", "").lower()
+        for v in o.values():
+            yield from _function_names(v)
+    elif isinstance(o, list):
+        for x in o:
+            yield from _function_names(x)
 
 
 def _normalize(o):

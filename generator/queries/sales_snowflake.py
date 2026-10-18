@@ -194,4 +194,24 @@ GROUP BY d.CalendarYear
 UNION ALL
 SELECT NULL, SUM(Quantity * UnitPrice) FROM FactOrderLine""",
      ["snowflake"]),
+
+    ("Count order lines by discount band: 'none' when there is no discount (missing or 0), 'small' below 10 percent, and 'large' at 10 percent or more.",
+     """SELECT CASE WHEN COALESCE(DiscountPct, 0) = 0 THEN 'none'
+            WHEN DiscountPct < 10 THEN 'small'
+            ELSE 'large'
+       END AS Band,
+       COUNT(*)
+FROM FactOrderLine
+GROUP BY 1""",
+     ['case', 'nullable']),
+
+    ("For each calendar date with sales, show revenue and a centered moving average: the average daily revenue of that day and the two days with sales before and after it. Order by date.",
+     """SELECT d.CalendarDate,
+       SUM(f.Quantity * f.UnitPrice) AS Revenue,
+       AVG(SUM(f.Quantity * f.UnitPrice)) OVER (ORDER BY d.CalendarDate ROWS BETWEEN 2 PRECEDING AND 2 FOLLOWING) AS Centered
+FROM FactOrderLine f
+JOIN DimCalendar d ON d.DateId = f.DateId
+GROUP BY d.CalendarDate
+ORDER BY d.CalendarDate""",
+     ['window_frame']),
 ]

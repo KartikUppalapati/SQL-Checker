@@ -156,4 +156,20 @@ SELECT sequelOfId FROM books WHERE sequelOfId IS NOT NULL""",
 UNION ALL
 SELECT fullName FROM authors""",
      ["generic_names"]),
+
+    ("For members with an email address, show the member's name and the domain part of the email (the text after the '@').",
+     """SELECT name, split_part(email, '@', 2) AS domain
+FROM members
+WHERE email IS NOT NULL""",
+     ['string_func', 'nullable']),
+
+    ("Classify each book by length: 'short' under 200 pages, 'medium' from 200 to 499, 'long' at 500 or more, and 'unknown' when the page count is missing. Show the title and the class.",
+     """SELECT title,
+       CASE WHEN pageCount IS NULL THEN 'unknown'
+            WHEN pageCount < 200 THEN 'short'
+            WHEN pageCount < 500 THEN 'medium'
+            ELSE 'long'
+       END AS lengthClass
+FROM books""",
+     ['case', 'nullable']),
 ]

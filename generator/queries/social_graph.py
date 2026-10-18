@@ -151,4 +151,21 @@ SELECT "userId" FROM "posts" WHERE "replyToPostId" = 42""",
     ("List every username with its country code, showing 'unknown' when the country code is missing.",
      """SELECT "userName", COALESCE("countryCode", 'unknown') AS country FROM "users\"""",
      ["nullable"]),
+
+    ("Which posts mention '#postgres' in any capitalization? Show the post id and the body length in characters.",
+     """SELECT "id", length("body") AS "bodyLength"
+FROM "posts"
+WHERE "body" ILIKE '%#postgres%'""",
+     ['string_func']),
+
+    ("For each user, show their username and the bodies of their three most recent top-level posts (not replies). Break ties by the highest post id.",
+     """SELECT u."userName", p."body"
+FROM "users" u
+CROSS JOIN LATERAL (
+    SELECT "body" FROM "posts"
+    WHERE "userId" = u."id" AND "replyToPostId" IS NULL
+    ORDER BY "createdAt" DESC, "id" DESC
+    LIMIT 3
+) p""",
+     ['lateral', 'top_k']),
 ]
