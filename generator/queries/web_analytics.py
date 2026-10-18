@@ -138,4 +138,28 @@ JOIN "dimPage" p ON p."pageKey" = v."pageKey"
 GROUP BY p."section"
 HAVING COUNT(*) FILTER (WHERE v."campaignKey" IS NULL) > COUNT(*) FILTER (WHERE v."campaignKey" IS NOT NULL)""",
      ["star", "having", "nullable"]),
+
+    ("Which pages have never been viewed? Return their URLs.",
+     """SELECT pg."url"
+FROM "dimPage" pg
+WHERE NOT EXISTS (SELECT 1 FROM "factPageView" v WHERE v."pageKey" = pg."pageKey")""",
+     ["anti_join", "star"]),
+
+    ("List the keys of visitors who were active in 2024, either by viewing a page or by placing an order.",
+     """SELECT v."visitorKey"
+FROM "factPageView" v
+JOIN "dimDate" d ON d."dateKey" = v."dateKey"
+WHERE d."year" = 2024
+UNION
+SELECT o."visitorKey"
+FROM "factOrder" o
+JOIN "dimDate" d ON d."dateKey" = o."dateKey"
+WHERE d."year" = 2024""",
+     ["star"]),
+
+    ("Which campaigns have no attributed orders? Give campaign names.",
+     """SELECT c."name"
+FROM "dimCampaign" c
+WHERE NOT EXISTS (SELECT 1 FROM "factOrder" o WHERE o."campaignKey" = c."campaignKey")""",
+     ["anti_join", "nullable", "star"]),
 ]

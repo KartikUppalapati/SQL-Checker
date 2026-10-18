@@ -160,4 +160,23 @@ JOIN dim_product p ON p.product_key = f.product_key
 JOIN dim_date d ON d.date_key = f.date_key
 WHERE p.is_discontinued = 1 AND d.year = 2024""",
      ["star", "flag_int", "generic_names"]),
+
+    ("Which customers have never made a purchase? Show their names.",
+     """SELECT c.name
+FROM dim_customer c
+WHERE NOT EXISTS (SELECT 1 FROM fact_sales f WHERE f.customer_key = c.customer_key)""",
+     ["anti_join", "nullable", "star"]),
+
+    ("List the keys of products that were sold in 2024 or are discontinued.",
+     """SELECT f.product_key
+FROM fact_sales f
+JOIN dim_date d ON d.date_key = f.date_key
+WHERE d.year = 2024
+UNION
+SELECT product_key FROM dim_product WHERE is_discontinued = 1""",
+     ["star", "flag_int"]),
+
+    ("How many sales have a discount recorded, and how many sales are there in total?",
+     "SELECT COUNT(discount_amount) AS discounted, COUNT(*) AS total FROM fact_sales",
+     ["star", "nullable"]),
 ]

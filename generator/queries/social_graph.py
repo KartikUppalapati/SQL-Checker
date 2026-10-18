@@ -135,4 +135,20 @@ GROUP BY u."id", u."userName\"""",
     ("How many users signed up from each country? Users without a country code are grouped together.",
      """SELECT "countryCode", COUNT(*) FROM "users" GROUP BY "countryCode\"""",
      ["nullable"]),
+
+    ("Which posts have not received any replies? Return post ids.",
+     """SELECT p."id"
+FROM "posts" p
+WHERE NOT EXISTS (SELECT 1 FROM "posts" r WHERE r."replyToPostId" = p."id")""",
+     ["anti_join", "nullable", "self_join"]),
+
+    ("List the ids of users who interacted with post 42, either by liking it or by replying to it.",
+     """SELECT "userId" FROM "postLikes" WHERE "postId" = 42
+UNION
+SELECT "userId" FROM "posts" WHERE "replyToPostId" = 42""",
+     []),
+
+    ("List every username with its country code, showing 'unknown' when the country code is missing.",
+     """SELECT "userName", COALESCE("countryCode", 'unknown') AS country FROM "users\"""",
+     ["nullable"]),
 ]

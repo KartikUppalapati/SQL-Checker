@@ -168,4 +168,30 @@ WHERE ci.Population IS NOT NULL
 ORDER BY ci.Population DESC
 LIMIT 10""",
      ["top_k", "nullable"]),
+
+    ("Which brands have no products in the catalog?",
+     """SELECT b.Name
+FROM DimBrand b
+WHERE NOT EXISTS (SELECT 1 FROM DimProduct p WHERE p.BrandId = b.BrandId)""",
+     ["anti_join", "nullable", "snowflake"]),
+
+    ("List, in one column, the distinct names of every city that has a store and every country that has a store.",
+     """SELECT ci.Name
+FROM DimStore s
+JOIN DimCity ci ON ci.CityId = s.CityId
+UNION
+SELECT co.Name
+FROM DimStore s
+JOIN DimCity ci ON ci.CityId = s.CityId
+JOIN DimCountry co ON co.CountryId = ci.CountryId""",
+     ["snowflake", "generic_names"]),
+
+    ("Show revenue for each calendar year, followed by a grand-total row whose year is NULL.",
+     """SELECT d.CalendarYear, SUM(f.Quantity * f.UnitPrice) AS Revenue
+FROM FactOrderLine f
+JOIN DimCalendar d ON d.DateId = f.DateId
+GROUP BY d.CalendarYear
+UNION ALL
+SELECT NULL, SUM(Quantity * UnitPrice) FROM FactOrderLine""",
+     ["snowflake"]),
 ]

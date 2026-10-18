@@ -138,4 +138,22 @@ WHERE ba.authorOrder = 1 AND b.publishedYear > 2000""",
     ("How many books exist in each language, most common first?",
      """SELECT language, COUNT(*) AS n FROM books GROUP BY language ORDER BY n DESC""",
      []),
+
+    ("Which publishers have not published any book in the catalog?",
+     """SELECT p.name
+FROM publishers p
+WHERE NOT EXISTS (SELECT 1 FROM books b WHERE b.publisherId = p.id)""",
+     ["anti_join", "nullable"]),
+
+    ("List the ids of books that belong to a series, either because they are a sequel or because another book is a sequel of them.",
+     """SELECT id FROM books WHERE sequelOfId IS NOT NULL
+UNION
+SELECT sequelOfId FROM books WHERE sequelOfId IS NOT NULL""",
+     ["self_join", "nullable"]),
+
+    ("Give one combined list of every member's name and every author's full name, keeping duplicates.",
+     """SELECT name FROM members
+UNION ALL
+SELECT fullName FROM authors""",
+     ["generic_names"]),
 ]

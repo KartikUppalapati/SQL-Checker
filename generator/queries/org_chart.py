@@ -142,4 +142,22 @@ WHERE "Status" = 'Terminated'
 ORDER BY "HireDate" DESC
 LIMIT 5""",
      ["flag_enum", "top_k"]),
+
+    ("Which office locations have no department assigned to them?",
+     """SELECT l."Name"
+FROM "Location" l
+WHERE NOT EXISTS (SELECT 1 FROM "Department" d WHERE d."LocationId" = l."Id")""",
+     ["anti_join", "nullable"]),
+
+    ("List the ids of employees who take part in any mentorship, as mentor or as mentee.",
+     """SELECT "MentorId" FROM "Mentorship"
+UNION
+SELECT "MenteeId" FROM "Mentorship\"""",
+     ["self_join"]),
+
+    ("Show each department id with its headcount, followed by one company-wide total row whose department is NULL.",
+     """SELECT "DepartmentId", COUNT(*) AS headcount FROM "Employee" GROUP BY "DepartmentId"
+UNION ALL
+SELECT NULL, COUNT(*) FROM "Employee\"""",
+     []),
 ]

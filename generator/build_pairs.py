@@ -39,8 +39,8 @@ QUERIES = ROOT / "dataset" / "queries.jsonl"
 SCHEMAS_DIR = ROOT / "dataset" / "schemas"
 OUT = ROOT / "dataset" / "pairs.jsonl"
 
-AUTO_EQ_PER_QUERY = 3
-AUTO_NEQ_PER_QUERY = 3
+AUTO_EQ_PER_QUERY = 4
+AUTO_NEQ_PER_QUERY = 4
 
 # Purely cosmetic rewrites: must leave the PostgreSQL parse tree unchanged. At most one per query,
 # so the automatic positives are dominated by structural rewrites.

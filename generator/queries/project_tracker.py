@@ -141,4 +141,22 @@ JOIN projects p ON p.id = pm.project_id
 JOIN users u ON u.id = pm.user_id
 WHERE pm.role = 'maintainer'""",
      ["m2m", "flag_enum", "generic_names"]),
+
+    ("Which users have never been assigned a task?",
+     """SELECT u.name
+FROM users u
+WHERE NOT EXISTS (SELECT 1 FROM tasks t WHERE t.assignee_id = u.id)""",
+     ["anti_join", "nullable"]),
+
+    ("List the ids of all tasks involved in a dependency, either as the blocked task or as the blocker.",
+     """SELECT task_id FROM task_dependencies
+UNION
+SELECT depends_on_task_id FROM task_dependencies""",
+     ["self_join"]),
+
+    ("Show how many tasks there are at each priority level, followed by a total row whose priority is NULL.",
+     """SELECT priority, COUNT(*) AS tasks FROM tasks GROUP BY priority
+UNION ALL
+SELECT NULL, COUNT(*) FROM tasks""",
+     []),
 ]

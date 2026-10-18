@@ -147,4 +147,22 @@ WHERE c.is_online = 1
 GROUP BY c.id, c.name
 HAVING COUNT(ci.instructor_id) > 1""",
      ["flag_int", "m2m", "having"]),
+
+    ("Which departments have no students who declared them as their major?",
+     """SELECT d.name
+FROM departments d
+WHERE NOT EXISTS (SELECT 1 FROM students s WHERE s.department_id = d.id)""",
+     ["anti_join", "nullable"]),
+
+    ("List every distinct name of a person on campus, students and instructors alike.",
+     """SELECT name FROM students
+UNION
+SELECT name FROM instructors""",
+     ["generic_names"]),
+
+    ("List the codes of all online courses together with the codes of 4-credit in-person courses.",
+     """SELECT code FROM courses WHERE is_online = 1
+UNION
+SELECT code FROM courses WHERE is_online = 0 AND credits = 4""",
+     ["flag_int"]),
 ]
