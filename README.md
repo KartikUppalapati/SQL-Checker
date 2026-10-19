@@ -27,6 +27,11 @@ tests/
 session/                # exported LLM/agent session history
 ```
 
+## What next
+
+I would focus on expanding coverage area to cases that require reasoning beyond what can be generalized without running the sql. Something like TypeSafe's Jev could be used for this. I'd look at previous cases where we got a prediction wrong and build out more test cases to cover those areas. Then I'd expand to more sql languages like mysql or sqlite.
+
+
 ## Usage
 
 ```bash
