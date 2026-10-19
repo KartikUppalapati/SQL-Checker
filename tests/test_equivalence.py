@@ -1078,6 +1078,25 @@ CASES = [
      "SELECT driver_id, SUM(distance_km::numeric) FROM trips GROUP BY driver_id", False, "an exact sum is not the double-precision sum"),
     (RIDE, "SELECT id FROM trips WHERE completed_at - started_at > INTERVAL '30 minutes'",
      "SELECT id FROM trips WHERE completed_at - started_at > 30", False, "there is no interval > integer operator"),
+    # --- date_part returns double precision, EXTRACT numeric ------------------------------------------
+    (ORG, '''SELECT EXTRACT(EPOCH FROM "HireDate") FROM "Employee"''',
+     '''SELECT date_part('epoch', "HireDate") FROM "Employee"''', False, "date_part output is double precision"),
+    (ORG, '''SELECT EXTRACT(YEAR FROM "HireDate") / 7 FROM "Employee"''',
+     '''SELECT date_part('year', "HireDate") / 7 FROM "Employee"''', False, "date_part arithmetic is double precision"),
+    (ORG, '''SELECT date_part('year', "HireDate") FROM "Employee"''',
+     '''SELECT DATE_PART('YEAR', "HireDate") FROM "Employee"''', True, "date_part spelled differently"),
+    (ORG, '''SELECT "Name" FROM "Employee" WHERE EXTRACT(YEAR FROM "HireDate") = 2020''',
+     '''SELECT "Name" FROM "Employee" WHERE date_part('year', "HireDate") = 2020''', True,
+     "date_part compared with an integer"),
+    (ORG, '''SELECT "Name" FROM "Employee" WHERE EXTRACT(MONTH FROM "HireDate") BETWEEN 1 AND 3''',
+     '''SELECT "Name" FROM "Employee" WHERE date_part('month', "HireDate") BETWEEN 1 AND 3''', True,
+     "date_part BETWEEN integers"),
+    (RIDE, "SELECT id FROM trips WHERE completed_at - started_at > INTERVAL '30 minutes'",
+     "SELECT id FROM trips WHERE date_part('epoch', completed_at - started_at) > 1800", True,
+     "the duration in seconds via date_part"),
+    (RIDE, "SELECT ROUND(EXTRACT(EPOCH FROM completed_at - started_at) / 60, 1) FROM trips",
+     "SELECT ROUND(date_part('epoch', completed_at - started_at) / 60, 1) FROM trips", False,
+     "round(double precision, integer) does not exist, and date_part is double precision"),
 ]
 
 

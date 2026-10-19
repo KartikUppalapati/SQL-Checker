@@ -1,0 +1,1318 @@
+
+❯ <ide_opened_file>The user opened the file
+  /Users/kartikuppalapati/Documents/Projects/SQL-Checker/sqleval/cli.py in the
+  IDE. This may or may not be related to the current task.</ide_opened_file>
+
+❯ Outline the step by step flow that the code takes for determining equivalence
+
+  Read 1 file, ran 4 shell commands (ctrl+o to expand)
+
+⏺ I've read the CLI, the equivalence gate and the canonicalizer's entry points,
+  and I have enough to lay out the flow.
+
+  How the checker decides two queries are equivalent
+
+  It never runs a query and never calls an LLM. It decides equivalence by
+  rewriting both queries into one canonical string and comparing the strings.
+
+  0. CLI driver (cli.py (sqleval/cli.py))
+
+  1. main() loads each <schema_id>.sql DDL file from --schemas and reads the
+     JSONL --pairs. Malformed lines are counted and skipped (cli.py:60-75
+     (sqleval/cli.py#L60-L75)).
+  2. With 400 or more pairs and more than one worker, pairs are scored in a
+     multiprocessing pool. Otherwise they are scored one after another
+     (cli.py:91-98 (sqleval/cli.py#L91-L98)).
+  3. score_pair() (cli.py:28-38 (sqleval/cli.py#L28-L38)):
+     - An empty prediction returns no_prediction.
+     - An empty ground truth returns no_ground_truth.
+     - Otherwise it calls compare(gt, predicted, schema_ddl). Any exception
+       becomes error:<Type>, so one bad pair can't abort the run.
+  4. Results go to --output as {id, match, score}, where score is 1.0 on a
+     match. A report follows with match rate, reasons, per-schema rates, and
+     precision/recall/F1 when pairs carry an equivalent label.
+
+  1. compare() (equivalence.py:61-95 (sqleval/equivalence.py#L61-L95))
+
+  Each step can return early:
+
+  ┌──────┬─────────────────────────────────────┬────────────────────────────┐
+  │ Step │                Check                │          Verdict           │
+  ├──────┼─────────────────────────────────────┼────────────────────────────┤
+  │      │ Run parse_tree(predicted) with      │                            │
+  │ 1    │ PostgreSQL's own parser (pglast /   │ invalid:<why>, score 0     │
+  │      │ libpg_query)                        │                            │
+  ├──────┼─────────────────────────────────────┼────────────────────────────┤
+  │      │ Analyze the ground truth with       │                            │
+  │ 2    │ _analyze_gt(), which is LRU-cached  │ ground_truth_unparseable   │
+  │      │ because many pairs share one ground │                            │
+  │      │  truth                              │                            │
+  ├──────┼─────────────────────────────────────┼────────────────────────────┤
+  │ 3    │ Compare the two pglast parse trees  │ identical_parse_tree,      │
+  │      │ directly                            │ match                      │
+  ├──────┼─────────────────────────────────────┼────────────────────────────┤
+  │      │ Run canonical.prepare(predicted):   │ invalid: (score 0) or      │
+  │ 4    │ sqlglot parse, name resolution and  │ unsupported (text          │
+  │      │ semantic checks                     │ similarity)                │
+  ├──────┼─────────────────────────────────────┼────────────────────────────┤
+  │ 5    │ Check whether the ground truth      │ ground_truth_unsupported   │
+  │      │ could be canonicalized              │                            │
+  ├──────┼─────────────────────────────────────┼────────────────────────────┤
+  │ 6    │ Run canonicalize_tree(pred, ctx,    │ invalid: / unsupported     │
+  │      │ gt_ordered)                         │                            │
+  ├──────┼─────────────────────────────────────┼────────────────────────────┤
+  │ 7    │ Compare the two canonical strings   │ canonical_match (match) or │
+  │      │                                     │  not_equivalent            │
+  └──────┴─────────────────────────────────────┴────────────────────────────┘
+
+  Notes on these steps:
+  - Step 1 accepts only a single SELECT. That includes VALUES, set operations
+    and WITH. It also rejects function names from other dialects such as IFNULL,
+    DATEADD and LEN (validate.py:13-38 (sqleval/validate.py#L13-L38)).
+  - Step 3 ignores formatting differences. Location fields are stripped and NOT
+    (x IS NULL) is folded to x IS NOT NULL (validate.py:55-66
+    (sqleval/validate.py#L55-L66)). So whitespace, keyword case and unquoted
+    identifier case don't matter.
+  - Step 6 copies ORDER BY sensitivity from the ground truth. The prediction's
+    outer ORDER BY only matters if the ground truth has one.
+
+  Partial credit (equivalence.py:100-118 (sqleval/equivalence.py#L100-L118)):
+  - Not equivalent: Jaccard overlap of canonical-form tokens × 0.95.
+  - Unsupported: Jaccard overlap of raw-text tokens × 0.5.
+  - Invalid: 0.
+
+  2. prepare() → parse_and_qualify() (canonical.py:399-438
+  (sqleval/canonical.py#L399-L438))
+
+  1. Pre-parse fixes: IS UNKNOWN and BETWEEN SYMMETRIC are rewritten, then
+     sqlglot parses with read="postgres".
+  2. Tree preparation: aggregates are marked and ordinals inside grouping sets
+     are expanded.
+  3. Without a schema: a lenient qualify runs and the tree is returned.
+  4. With a schema:
+     - Postgres identifier case folding is applied.
+     - Every referenced table must exist (_check_tables).
+     - NATURAL JOIN is converted to USING.
+     - semantic.check_names looks for ambiguous or duplicate aliases, bad
+       positional references and missing FROM entries.
+     - qualify runs against the schema. An unresolved column raises Invalid,
+       unless libpg_query shows the columns are real, in which case sqlglot
+       misparsed it and it is Unsupported.
+     - semantic.check_types checks type compatibility, literal conversions and
+       boolean contexts.
+     - _check_grouping checks that selected columns are grouped or aggregated.
+
+  3. canonicalize_tree() (canonical.py:5623-5693
+  (sqleval/canonical.py#L5623-L5693))
+
+  Every rewrite has to be sound for any database that satisfies the schema's
+  types, primary keys, NOT NULL constraints and foreign keys. If a precondition
+  can't be proven, the rewrite is skipped. Without a schema, only rewrites that
+  don't need one fire.
+
+  a. Structural cleanup
+  - Strip parentheses, inline named windows, normalize grouping sets and
+    clauses.
+  - Drop row limits that do nothing.
+  - Strip ORDER BYs that can't affect the result.
+  - Inline CTEs. Unpivot becomes a UNION. SELECT * over a set operation is
+    expanded.
+
+  b. Set-operation and derived-table rewrites
+  - UNION becomes UNION ALL when the branches are provably distinct or disjoint.
+  - Recursive-CTE unions and grand-total unions become GROUPING SETS.
+  - Lateral joins are rewritten. Whole-partition windows become scalar
+    subqueries.
+  - DISTINCT is pushed over UNION ALL.
+  - Aliases are made unique. ORDER BY aliases are resolved.
+  - GROUP BY without aggregates becomes DISTINCT.
+  - Derived columns are pruned and made positional. Simple derived tables are
+    merged.
+
+  c. Schema-aware tree rewrites (a Resolver tracks scopes, types and
+  nullability)
+  - EXCEPT on a key becomes NOT EXISTS.
+  - Grouped derived tables are merged or left-joined.
+  - Counts over distinct derived tables and averages of group sums are
+    rewritten.
+  - ROW_NUMBER() = 1 becomes DISTINCT ON or LIMIT.
+  - Value sets become semi-joins.
+
+  d. Expression normalization (_norm_expr, applied to every node)
+  - Comparisons are put in a standard orientation.
+  - BETWEEN, enum casts, date and integer bounds, date arithmetic, boolean
+    tests, CASE and literal coercion are normalized.
+
+  e. Per-SELECT rewrites, innermost first, two passes (_scope_rewrites,
+  canonical.py:3077-3110 (sqleval/canonical.py#L3077-L3110))
+  - Decorrelate subqueries.
+  - Scalar subqueries become joins.
+  - IN becomes EXISTS. Anti-join LEFT JOIN … IS NULL becomes NOT EXISTS.
+  - LEFT JOIN is promoted to an inner join when a foreign key guarantees the
+    match.
+  - Foreign-key-only joins and self-joins on a key are eliminated.
+  - Redundant IS NOT NULL checks are dropped. COUNT(col) becomes COUNT(*) when
+    col can't be null.
+  - GROUP BY keys are reduced using functional dependencies. DISTINCT is dropped
+    when rows are already unique.
+  - Equality equivalence classes are built.
+
+  There are two passes because a rewrite in an outer scope can make a rewrite in
+  an inner scope possible.
+
+  f. Final passes
+  - Canonical COUNT forms (which triggers one more rewrite pass).
+  - Aggregates are moved into scalar subqueries.
+  - CASE is canonicalized.
+  - EXISTS bodies are cleaned to SELECT 1.
+  - ORDER BY is stripped once more.
+
+  4. serialize() (canonical.py:5588-5611 (sqleval/canonical.py#L5588-L5611))
+
+  - The tree is written out so that order doesn't matter: WHERE conjuncts,
+    inner-join relations and GROUP BY keys are sorted, and operands of
+    commutative operators (=, <>, +, *) are sorted.
+  - Aliases get canonical names such as T:orders#0. When several aliases point
+    to the same table, every permutation is tried (up to 720) and the
+    lexicographically smallest string wins. Above 720 it falls back to
+    definition order.
+
+  Two queries are equivalent only if these final strings are byte-identical.
+  That makes the design conservative: when it can't prove a rewrite is safe, it
+  skips it, so it can miss a real equivalence but shouldn't claim a false one.
+
+❯ What are some other approaches to determine equivalence and give me a pro con
+  to other approaches vs what we're doing
+
+⏺ Alternatives to our approach fall into six families. Our approach, for
+  comparison: rewrite both queries into a canonical form using rules that
+  respect schema constraints, then compare the strings. It doesn't execute
+  anything or call an LLM.
+
+  1. Exact match / component match (Spider-style)
+
+  Parse both queries and compare clause by clause (SELECT set, WHERE set, etc.),
+  ignoring the order of items within each clause.
+  - Pros: trivial to build, fast, deterministic.
+  - Cons: very low recall. IN vs EXISTS, JOIN vs subquery, or GROUP BY vs
+    DISTINCT all count as different. Literals are often ignored, which also lets
+    wrong queries pass.
+  - Vs. ours: our approach is a much stronger version of the same idea. Our
+    steps 3 (identical parse trees) and 7 (identical canonical strings) are this
+    approach with a large rewrite engine in between.
+
+  2. Execution-based (denotation match, test-suite accuracy)
+
+  Run both queries against one or more databases and compare the results.
+  "Test-suite accuracy" (Zhong et al., 2020) generates many databases designed
+  to separate near-miss queries.
+  - Pros:
+    - Recall is close to perfect: it catches any equivalence, however different
+      the syntax.
+    - Little code per feature, and the database engine defines the semantics, so
+      Postgres quirks are handled automatically.
+  - Cons:
+    - False positives: two different queries can return the same result on a
+      given database. One database is weak; test suites help but give no
+      guarantee.
+    - Needs a live Postgres plus data generation that satisfies the schema's
+      constraints. That's slower and has more infrastructure.
+    - ORDER BY and LIMIT ties, non-determinism, and time functions such as now()
+      make it noisy.
+    - Gives no explanation of why two queries differ.
+  - Vs. ours: it's the reverse trade-off. Execution favors recall and risks
+    false positives; ours favors precision and risks false negatives. It also
+    breaks our "no execution" constraint.
+
+  3. Formal verification / provers
+
+  Encode both queries in a formal semantics and prove equivalence:
+  - Cosette: uses semirings and a proof assistant / SMT solver.
+  - EQUITAS / SPES: symbolic representation plus SMT. EQUITAS assumes set
+    semantics; SPES handles bag semantics.
+  - QED / SQLSolver: newer, with broader coverage including aggregates and
+    integrity constraints.
+  - Pros: a "yes" is a sound proof, not a set of heuristics. Some tools can use
+    primary key and foreign key constraints.
+  - Cons:
+    - Each tool covers a fragment of SQL. Typical gaps: window functions, outer
+      joins, NULL three-valued logic, string, date and interval functions,
+      recursive CTEs, Postgres-specific syntax.
+    - The general problem is undecidable, so many queries end in "unknown" or a
+      timeout.
+    - Research-grade tools and Java/Coq dependencies make them awkward to
+      operate.
+  - Vs. ours: theirs is sound by proof; ours is sound only if every one of our
+    hand-written rules is correct. Ours covers more practical SQL, and they
+    often give up exactly where ours still works.
+
+  4. Counterexample search / bounded model checking
+
+  Search for a small database, valid under the schema, on which the two queries
+  return different results. Examples: VeriEQL, XData-style mutation testing,
+  SMT-generated instances.
+  - Pros:
+    - A disagreement found is a certain "not equivalent", with a concrete
+      counterexample database you can inspect.
+    - Can respect primary key, foreign key and NOT NULL constraints.
+  - Cons: "no counterexample up to size N" is not a proof. It has the same SQL
+    coverage limits as the provers, and solver time grows quickly.
+  - Vs. ours: it complements ours rather than competing with it. It's strongest
+    exactly where ours is weakest: catching unsound rewrites, which are false
+    positives.
+
+  5. Optimizer plan comparison
+
+  Feed both queries to Postgres's planner (EXPLAIN, or a Calcite-style
+  normalized plan) and compare the plans.
+  - Pros: reuses a mature rewrite engine for free (subquery pull-up, join
+    reordering, constant folding).
+  - Cons:
+    - Plans depend on statistics and costs, so equivalent queries often get
+      different plans.
+    - Planners deliberately don't do many rewrites we need, such as eliminating
+      joins via foreign keys or reducing GROUP BY keys.
+    - Needs a live Postgres with the schema loaded.
+  - Vs. ours: less reliable than our rewrites, because the planner optimizes for
+    speed, not for canonical form.
+
+  6. LLM-as-judge
+
+  Ask a model whether the two queries are equivalent.
+  - Pros: zero rule maintenance, handles anything, explains its reasoning in
+    natural language.
+  - Cons: not deterministic. It misses subtle NULL, bag-vs-set and ordering
+    issues, can be talked into "equivalent", and costs money with latency. Not
+    reproducible enough for a benchmark score.
+  - Vs. ours: ours is deterministic and auditable. An LLM is mainly useful for
+    triaging our not_equivalent failures, to find rules we're missing.
+
+  Summary
+
+  Approach: Ours (canonical rewrite)
+  False positives: Low, if every rule is correct
+  False negatives: Medium (limited by rule coverage)
+  Coverage of real SQL: High
+  Infrastructure: None
+  Explainable: Yes (reason codes)
+  ────────────────────────────────────────
+  Approach: Exact / component match
+  False positives: Medium
+  False negatives: Very high
+  Coverage of real SQL: High
+  Infrastructure: None
+  Explainable: Yes
+  ────────────────────────────────────────
+  Approach: Execution / test suites
+  False positives: Medium
+  False negatives: Very low
+  Coverage of real SQL: Full
+  Infrastructure: Postgres + data generation
+  Explainable: No
+  ────────────────────────────────────────
+  Approach: Formal provers
+  False positives: None (proof)
+  False negatives: High ("unknown")
+  Coverage of real SQL: Low–medium
+  Infrastructure: Solver / Coq
+  Explainable: Proof
+  ────────────────────────────────────────
+  Approach: Counterexample search
+  False positives: None for a "not equivalent" result
+  False negatives: n/a (can't prove a match)
+  Coverage of real SQL: Low–medium
+  Infrastructure: SMT
+  Explainable: Counterexample
+  ────────────────────────────────────────
+  Approach: Plan comparison
+  False positives: Low
+  False negatives: High
+  Coverage of real SQL: Full
+  Infrastructure: Postgres
+  Explainable: Weak
+  ────────────────────────────────────────
+  Approach: LLM judge
+  False positives: Medium
+  False negatives: Medium
+  Coverage of real SQL: Full
+  Infrastructure: API
+  Explainable: Narrative
+
+  Where ours is weakest
+
+  1. Soundness is only argued, not proven. The roughly 5.7k lines of rewrite
+     rules each carry a precondition someone reasoned out by hand. One subtle
+     bug, around NULLs or bag semantics for example, silently produces false
+     positives.
+  2. Recall grows only as fast as we add rules, and the rules interact. Order
+     dependence is why the code runs R.refresh and two scope passes.
+  3. We depend on sqlglot's parse matching Postgres semantics. We have
+     workarounds for INTERVAL, BETWEEN SYMMETRIC and IS UNKNOWN for exactly this
+     reason.
+
+  Recommendation
+
+  Keep the canonicalizer as the scorer, since it fits the no-execution,
+  deterministic design, and add a counterexample checker as an offline audit.
+  Run a constraint-satisfying data generator plus Postgres (or VeriEQL) over
+  every pair we mark canonical_match. Any disagreement points straight at an
+  unsound rule. You can optionally run test-suite execution over not_equivalent
+  pairs to find missing rules worth writing. That keeps the scoring path free of
+  execution and gives us an independent check on the two kinds of error we
+  can't measure today.
+
+❯ <ide_opened_file>The user opened the file
+  /Users/kartikuppalapati/Documents/Projects/SQL-Checker/sqleval/canonical.py
+  in the IDE. This may or may not be related to the current
+  task.</ide_opened_file>
+
+❯ Explain the canonicalizer and the rewrites it does
+
+⏺ I'll pull the docstrings and comments from the rewrite functions so each one
+  is described accurately rather than inferred from its name.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The docstrings cover most rules. Next I'll read the expression normalizers,
+  which are mostly inline comments rather than docstrings.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The canonicalizer (canonical.py (sqleval/canonical.py))
+
+  The canonicalizer turns any supported Postgres query into a single string. Two
+  queries count as equivalent when their strings are identical. It does this in
+  three steps:
+
+  1. Rewrite the query toward one preferred spelling of each idea.
+  2. Normalize the parts whose order doesn't matter.
+  3. Serialize the result.
+
+  The soundness rule
+
+  The module header (canonical.py:1-15 (sqleval/canonical.py#L1-L15)) sets the
+  rule everything else follows. A rewrite may run only if it gives the same
+  result on every database that satisfies the schema. If a rewrite's
+  precondition can't be proven, it is skipped.
+
+  Most rewrites check one or more of these facts before firing:
+  - Keys: primary key or UNIQUE NOT NULL, meaning "at most one row matches".
+  - Foreign keys: "exactly one parent row exists".
+  - NOT NULL and outer-join nullability: "this column can't be NULL here",
+    worked out by Resolver and _scope_nonnull.
+  - Column types: exact integer/NUMERIC vs float, discrete types like integer
+    and date, enum labels.
+  - Truth context: in WHERE, HAVING, ON or a CASE condition, NULL and FALSE
+    behave the same, because both reject the row.
+
+  Without a schema, every catalog lookup returns "unknown", so only rewrites
+  that don't depend on the schema fire.
+
+  ---
+
+  Stage 1: Parse and resolve (prepare)
+
+  The sqlglot parse is patched where it gets Postgres wrong:
+  - IS UNKNOWN becomes IS NULL.
+  - BETWEEN SYMMETRIC is expanded.
+  - Malformed INTERVAL strings stay as literals instead of being misread.
+
+  Then every column is qualified as alias.column against the schema, using
+  Postgres case folding. NATURAL JOIN becomes USING, and the name, type and
+  grouping checks run. Failures raise one of two errors:
+  - Invalid: the query is wrong, for example an unresolved column or a type
+    error.
+  - Unsupported: the tool can't handle the query. It says nothing about whether
+    the query is correct.
+
+  Stage 2: Structural cleanup
+
+  These rewrites change how the query is spelled, not what it means:
+
+  ┌─────────────────────────────┬───────────────────────────────────────────┐
+  │           Rewrite           │                  Example                  │
+  ├─────────────────────────────┼───────────────────────────────────────────┤
+  │ Strip parentheses, inline   │ OVER w becomes the full window definition │
+  │ WINDOW w AS (...)           │                                           │
+  ├─────────────────────────────┼───────────────────────────────────────────┤
+  │ Normalize grouping sets     │ ROLLUP(a) becomes GROUPING SETS((a),())   │
+  ├─────────────────────────────┼───────────────────────────────────────────┤
+  │ Drop no-op limits           │ OFFSET 0, or LIMIT 5 on an ungrouped      │
+  │                             │ aggregate                                 │
+  ├─────────────────────────────┼───────────────────────────────────────────┤
+  │ Strip ORDER BYs that can't  │ ORDER BY in a subquery with no LIMIT. The │
+  │ matter                      │  outer ORDER BY is kept only if the       │
+  │                             │ ground truth has one.                     │
+  ├─────────────────────────────┼───────────────────────────────────────────┤
+  │ Inline CTEs                 │ WITH t AS (...) SELECT ... FROM t becomes │
+  │                             │  a derived table                          │
+  ├─────────────────────────────┼───────────────────────────────────────────┤
+  │ Unique aliases, positional  │ Derived-table output columns are renamed  │
+  │ derived columns             │ _c0, _c1, … because their names are       │
+  │                             │ internal                                  │
+  ├─────────────────────────────┼───────────────────────────────────────────┤
+  │ Resolve ORDER BY aliases    │ ORDER BY total becomes ORDER BY SUM(x)    │
+  ├─────────────────────────────┼───────────────────────────────────────────┤
+  │ Prune unused derived        │ SELECT d.a FROM (SELECT a, b FROM t WHERE │
+  │ columns, merge simple       │  p) d becomes SELECT t.a FROM t WHERE p   │
+  │ derived tables              │                                           │
+  └─────────────────────────────┴───────────────────────────────────────────┘
+
+  Stage 3: Set operations, laterals, windows
+
+  - UNION becomes UNION ALL when each branch's rows are distinct and the
+    branches are disjoint, for example status='a' vs status='b' on a key. The
+    same applies to recursive CTEs that walk a single-parent tree.
+  - DISTINCT over UNION ALL becomes UNION. DISTINCT is also added to plain
+    branches of a set operation, since UNION, INTERSECT and EXCEPT deduplicate
+    anyway.
+  - G UNION ALL <grand total> becomes GROUP BY GROUPING SETS ((k…), ()).
+  - unnest(ARRAY[a,b]) or LATERAL (VALUES …) becomes a UNION of one SELECT per
+    element.
+  - Plain LATERAL subqueries become joins. The "previous row" pattern (LATERAL …
+    ORDER BY d DESC LIMIT 1) becomes LAG().
+  - AGG(x) OVER () in an ungrouped SELECT becomes a scalar subquery.
+  - GROUP BY without aggregates becomes SELECT DISTINCT.
+
+  Stage 4: Schema-aware whole-tree rewrites
+
+  - L EXCEPT R becomes … WHERE NOT EXISTS (… r = l), when L's columns can't be
+    NULL.
+  - Grouped derived tables are merged into the outer query. LEFT JOIN (SELECT k,
+    AGG … GROUP BY k) becomes a LEFT JOIN plus GROUP BY on the outer tables'
+    primary keys.
+  - Counts and averages over grouped subqueries:
+    - COUNT(t.x) FROM (SELECT DISTINCT g, x …) becomes COUNT(DISTINCT x) … GROUP
+      BY g.
+    - AVG of group SUMs becomes SUM / COUNT(DISTINCT k).
+  - ROW_NUMBER() filters:
+    - ROW_NUMBER() … WHERE rn = 1 becomes DISTINCT ON (P) … ORDER BY P, O.
+    - rn <= n with no partition becomes ORDER BY O LIMIT n.
+  - Sets of key values become semi-joins. SELECT DISTINCT o.customer_id … (an
+    FK) becomes SELECT c.id FROM customers c WHERE EXISTS (…), so the different
+    ways of writing "which customers…" end up as the same query.
+
+  Stage 5: Expression normalization (_norm_expr, run on every node)
+
+  Comparisons (_norm_comparison):
+  - The column goes on the left: 5 < x becomes x > 5.
+  - Literals are coerced to the column's type: '5' becomes 5, 't' becomes TRUE,
+    date strings become typed dates.
+  - Discrete bounds are made consistent: x <= 5 becomes x < 6 for integers and
+    dates.
+  - BETWEEN becomes a pair of bounds.
+  - EXTRACT(YEAR FROM d) = 2024 becomes a date range on d.
+  - Date and interval arithmetic on literals is folded: DATE '2024-01-01' +
+    INTERVAL '1 month' becomes a literal.
+  - Timestamptz literals get one canonical spelling.
+  - Numeric literals get one spelling: 1e4 and 10000.0 both become 10000.
+
+  Boolean logic (_norm_boolean):
+  - x = TRUE becomes x.
+  - COALESCE(x, FALSE) becomes x IS TRUE, which becomes x in a truth context.
+  - De Morgan's laws apply. They hold under three-valued logic too.
+  - NOT bool_or(NOT x) becomes bool_and(x).
+
+  Identities that hold even with NULLs (_norm_expr_extra):
+  - x = ANY(ARRAY[...]) becomes IN. = ANY (subquery) also becomes IN.
+  - Row comparisons (a,b) = (x,y) become a = x AND b = y.
+  - Simple CASE x WHEN becomes a searched CASE. A COALESCE written as CASE
+    becomes COALESCE.
+  - IS DISTINCT FROM on operands that can't be NULL becomes <>.
+  - (SELECT COUNT(*) …) = 0 becomes NOT EXISTS.
+  - strpos(s,p) > 0 becomes LIKE '%p%'.
+  - char_length becomes length. CONCAT of non-NULL arguments becomes ||.
+  - GREATEST or LEAST written as CASE is normalized.
+  - a - b > 0 becomes a > b for exact types.
+  - Window defaults are made explicit: LAG(x) becomes LAG(x, 1, NULL). Ranking
+    functions ignore the frame.
+
+  Stage 6: Per-SELECT rewrites (_scope_rewrites)
+
+  These run on each SELECT, innermost first, in two passes, because a rewrite in
+  an outer scope can make an inner one possible.
+
+  Subqueries become joins (decorrelation):
+  - col = (SELECT x.c FROM t x WHERE key = literal) becomes a JOIN, because the
+    subquery returns at most one row.
+  - A scalar subquery on a key in the SELECT list becomes a LEFT JOIN. Chains of
+    these work too.
+  - A correlated (SELECT AGG … WHERE corr) becomes LEFT JOIN … GROUP BY <outer
+    primary keys>. With a matching EXISTS it becomes an inner JOIN.
+  - EXISTS becomes an inner join when the outer query is DISTINCT, or when the
+    correlation fixes a key.
+  - WHERE h.c = (SELECT MAX(c) …) on a unique key becomes DISTINCT ON.
+
+  Semi-joins and anti-joins:
+  - x IN (SELECT y …) becomes EXISTS (… y = x).
+  - NOT IN becomes NOT EXISTS, but only when neither side can be NULL, since a
+    NULL changes what NOT IN returns.
+  - LEFT JOIN b … WHERE b.notnull_col IS NULL becomes NOT EXISTS.
+  - LEFT JOIN … HAVING COUNT(b.c) = 0 becomes NOT EXISTS.
+  - HAVING COUNT(b.c) > 0 turns the LEFT JOIN into an inner JOIN.
+  - x IN (A INTERSECT B) becomes x IN A AND x IN B.
+  - HAVING COUNT(DISTINCT x) = n over IN (v1..vn) becomes one EXISTS per value.
+
+  Joins, using keys and foreign keys:
+  - RIGHT JOIN becomes LEFT JOIN.
+  - LEFT JOIN parent ON parent.pk = child.fk with a NOT NULL fk becomes an inner
+    join.
+  - A join to a parent that only reads the parent's key is dropped: x.k becomes
+    a.fk.
+  - EXISTS (SELECT 1 FROM parent WHERE pk = a.fk) becomes a.fk IS NOT NULL.
+  - A self-join on a key inside a subquery is the outer row itself, so the join
+    is replaced by that row.
+  - EXISTS over unrelated tables is split into separate EXISTS clauses. EXISTS
+    (… a OR b) is split into an OR of EXISTS.
+  - Equivalence classes: after a.x = b.y, uses of either column are rewritten to
+    one representative chosen by (table, column), never by alias.
+
+  Aggregates and grouping:
+  - COUNT(notnull_col) becomes COUNT(*).
+  - SUM(x)/COUNT(x) becomes AVG(x) for exact types.
+  - X / NULLIF(COUNT(*), 0) becomes X / COUNT(*) when the count is never 0.
+  - SUM identities:
+    - SUM(CASE WHEN p THEN x END) becomes SUM(x) FILTER (WHERE p).
+    - SUM(a*(b-c)) becomes SUM(a*b) - SUM(a*c), only for exact types.
+  - GROUP BY reduction: grouping by a table's key plus other columns of that
+    table becomes grouping by the primary key alone. A GROUP BY that covers
+    every source table's key is dropped.
+  - DISTINCT is dropped when rows are already unique: keys are in the output,
+    the query returns a single aggregate row, or the GROUP BY keys are in the
+    output.
+
+  Small cleanups:
+  - A redundant x IS NOT NULL is dropped when x is a NOT NULL column or a strict
+    comparison already rejects NULL.
+  - NULLS FIRST/LAST on a sort key that can't be NULL becomes the default.
+  - RANGE window frames become ROWS when no ties are possible.
+
+  Stage 7: Final passes
+
+  - Count normalization: every way of counting rows that meet a condition
+    becomes COUNT(*) FILTER (WHERE cond). For example, COUNT(*) - COUNT(c)
+    becomes FILTER (WHERE c IS NULL). The scope rewrites then run once more.
+  - An ungrouped aggregate SELECT that mixes in scalar subqueries gets each
+    aggregate turned into its own scalar subquery.
+  - CASE is canonicalized:
+    - A CASE that covers every enum label turns its last WHEN into ELSE.
+    - Numeric range conditions are evaluated with three-valued logic, so
+      differently written but equivalent branches compare equal.
+  - EXISTS bodies become SELECT 1.
+  - ORDER BYs that can't matter are stripped again.
+
+  Stage 8: Serialization (serialize / _Ser)
+
+  The writer ignores order wherever the semantics do:
+  - Sorted: WHERE conjuncts, inner-join relations, GROUP BY keys within a set,
+    VALUES rows, and operands of = <> + *.
+  - Kept in order: SELECT list, ORDER BY, and outer-join order. They carry
+    meaning.
+  - Literals: strings are written 'x', numbers #x, so '5' and 5 can't collide.
+  - Aliases become T:<table>#i. When a table appears more than once, alias
+    permutations are tried and the smallest string wins, so swapping o1/o2
+    doesn't change the result. Above 720 permutations, it uses a fixed order.
+
+  ---
+
+  Implications
+
+  - Rule order matters. Many rewrites assume earlier ones already ran. For
+    example, _canonical_case runs once, after comparisons are normalized. That's
+    why the pipeline calls R.refresh repeatedly and repeats passes. A new rule
+    needs to go at the right point.
+  - Every rule is a pattern match with a precondition. An equivalence nobody
+    wrote a rule for comes out as not_equivalent, a false negative.
+  - A wrong precondition gives a false positive, which is the costlier failure.
+    The rules most exposed are the ones about NULLs, keys and foreign keys: NOT
+    IN, LEFT-JOIN promotion, DISTINCT/GROUP BY dropping and decorrelation.
+    They're the best place to aim the counterexample audit I suggested earlier.
+
+❯ <ide_opened_file>The user opened the file
+  /Users/kartikuppalapati/Documents/Projects/SQL-Checker/sqleval/canonical.py
+  in the IDE. This may or may not be related to the current
+  task.</ide_opened_file>
+
+❯ if we're rewriting the query using the rules in canonical.py how are we using
+  the tree from the parser sqlglot
+
+  Listed 1 directory, ran 3 shell commands (ctrl+o to expand)
+
+⏺ The sqlglot tree is the thing being rewritten. Every rule in canonical.py
+  edits that tree in place. Nothing works on SQL text, and the code never turns
+  the tree back into SQL. At the end the tree is written straight to the
+  comparison string.
+
+  Two parsers, two jobs
+
+  Parser: pglast (Postgres's own C parser)
+  Where: validate.py (sqleval/validate.py)
+  Tree used for: Checking the query is valid Postgres, plus the quick "identical
+
+  parse tree" match. It is a JSON dict and is never rewritten.
+  ────────────────────────────────────────
+  Parser: sqlglot
+  Where: canonical.py (sqleval/canonical.py)
+  Tree used for: Everything else: name resolution, every rewrite rule,
+  serialization
+
+  pglast decides what real Postgres would accept. sqlglot is used for rewriting
+  because its tree is made of Python objects with an editing API.
+
+  What the sqlglot tree looks like
+
+  Here is SELECT o.id FROM orders o WHERE 5 < o.total AND o.status = 'paid',
+  printed from the project's .venv:
+
+  Select(
+    expressions=[Column(this=id, table=o)],
+    from=From(this=Table(this=orders, alias=TableAlias(o))),
+    where=Where(
+      this=And(
+        this=LT(this=Literal(5), expression=Column(total, table=o)),
+        expression=EQ(this=Column(status, table=o), expression=Literal('paid',
+  is_string=True)))))
+
+  Each node is an exp.Expression subclass (Select, Join, Column, EQ, Exists, …).
+  Its children sit in node.args under names like "from", "joins", "where" and
+  "group", and each child points back to its parent.
+
+  How the tree is used, stage by stage
+
+  1. Build and annotate (canonical.py:393-438 (sqleval/canonical.py#L393-L438))
+  - sqlglot.parse_one(sql, read="postgres") builds the tree.
+  - qualify(tree, schema=…) rewrites it so every Column carries its table alias,
+    SELECT * is expanded, and identifiers are case-folded.
+  - The rules depend on this: when a rule sees Column(total, table=o), it knows
+    exactly which table that is.
+
+  2. Look things up with Resolver (canonical.py:143-210
+  (sqleval/canonical.py#L143-L210))
+  - The Resolver walks the tree with tree.find_all(exp.Select) and builds a map
+    from each alias to its Table node.
+  - With that map plus the schema, rules can ask:
+    - R.base_table("o") returns "orders".
+    - R.column(col) returns the schema's column, including its type and NOT NULL
+      flag.
+    - R.nullable_side("b") says whether b sits on the NULL side of an outer
+      join, worked out from each Join node's side argument.
+  - R.refresh(tree) rebuilds the map after rewrites add or remove tables. That's
+    why it's called repeatedly in canonicalize_tree.
+
+  3. Each rule: find a pattern, check the schema, edit the tree
+
+  A typical rule is _fk_exists_to_null_test (sqleval/canonical.py#L3618-L3646),
+  which turns EXISTS (SELECT 1 FROM parent x WHERE x.k = a.f) into a.f IS NOT
+  NULL:
+
+  for c in _conjuncts(where.this):                       # split the And(...)
+  chain into a list
+      if isinstance(ex, exp.Exists):                     # match a node type
+          s = ex.this                                     # the subquery's
+  Select node
+          conds = _conjuncts(s.args["where"].this)        # look inside its
+  WHERE
+          if ... isinstance(conds[0], exp.EQ):            # one equality, column
+  = column
+              atab = R.base_table(r.table)                # Resolver: which
+  table is "a"?
+              if any(fk.ref_table == ptab ... for fk in
+  ctx.table(atab).foreign_keys):  # schema check
+                  test = exp.Is(this=r.copy(), expression=exp.Null())   # build
+  new nodes
+                  out.append(exp.Not(this=test))
+  ...
+  _where_set(sel, out)                                    # put the new WHERE
+  back on the Select
+
+  The rules all use the same few sqlglot operations:
+  - Matching: isinstance(node, exp.X), node.args.get("where"),
+    node.find_all(exp.Column).
+  - Building nodes: exp.Is(...), exp.Join(..., side="LEFT"),
+    exp.Literal.number(1).
+  - Editing:
+    - node.set("joins", [...]) replaces a child.
+    - node.replace(new) swaps a node in its parent.
+    - tree.transform(fn) rebuilds the tree bottom-up through a function.
+      _norm_expr and _canonical_case run this way on every node.
+  - Copying: node.copy() makes an independent copy, so one subtree can be moved
+    or duplicated without being shared. Inlining CTEs and splitting EXISTS need
+    this. It's also why _unique_aliases reruns after those rewrites.
+
+  canonicalize_tree starts with tree = tree.copy() (canonical.py:5624
+  (sqleval/canonical.py#L5624)). The ground truth's prepared tree is cached in
+  _analyze_gt, so the edits must not touch the original.
+
+  4. Serialize the final tree, not back to SQL (canonical.py:5382-5611
+  (sqleval/canonical.py#L5382-L5611))
+  _Ser walks the rewritten tree and writes a custom string. It dispatches on
+  node type (_Select, _Column, _And, …):
+  - WHERE conjuncts, inner-join relations and the operands of commutative
+    operators are sorted.
+  - Aliases are replaced with canonical names like T:orders#0.
+
+  The output looks like SELECT(sel=[…];from={…};where={…}). It is only ever
+  compared with another string like it and is never executed. That's why it can
+  sort WHERE conditions freely, which real SQL output would have no reason to
+  do.
+
+  In short
+
+  SQL text
+    └─ sqlglot.parse_one ──► exp.Select tree
+         └─ qualify(schema) ──► every column resolved to its table
+              └─ ~100 rules: match node shapes, check schema via Resolver/ctx,
+  edit the tree
+                   └─ _Ser walks the final tree ──► canonical string ──► ==
+
+  The rules in canonical.py are tree transformations on sqlglot's AST. sqlglot
+  supplies the data structure and the editing tools; what counts as equivalent
+  is decided entirely by our rules and the serializer.
+
+  One risk follows from this. Everything assumes sqlglot built the tree with
+  Postgres's meaning. Where it doesn't, the code has to patch around it, as with
+  the INTERVAL regex override, BETWEEN SYMMETRIC, IS UNKNOWN, and treating
+  ambiguous qualify failures as Unsupported when pglast shows the columns exist.
+
+❯ sqlglot is using postgresql only to parse right? Are those postgresql
+  keywords not understood by sqlglot?
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ No, sqlglot doesn't use PostgreSQL at all. read="postgres" picks sqlglot's own
+  Postgres dialect, a pure-Python rewrite of the Postgres grammar maintained by
+  the sqlglot project. It never calls Postgres code, so it only approximates
+  how Postgres parses. Where it differs, it can fail to parse a query or, worse,
+  quietly read it as something else.
+
+  ┌──────────┬──────────────────────────────┬───────────────────────────────┐
+  │          │     pglast (validate.py      │    sqlglot (canonical.py      │
+  │          │    (sqleval/validate.py))    │    (sqleval/canonical.py))    │
+  ├──────────┼──────────────────────────────┼───────────────────────────────┤
+  │          │ Python wrapper around        │                               │
+  │ What it  │ libpg_query, the actual C    │ Independent Python parser     │
+  │ is       │ parser taken from Postgres's │ with per-dialect rules        │
+  │          │  source                      │                               │
+  ├──────────┼──────────────────────────────┼───────────────────────────────┤
+  │ Accuracy │ Exactly what Postgres        │ An approximation; can misread │
+  │          │ accepts, by construction     │  or reject valid Postgres     │
+  ├──────────┼──────────────────────────────┼───────────────────────────────┤
+  │          │                              │ Typed Python objects with     │
+  │ Tree     │ Raw JSON dict, no editing    │ find, replace, transform,     │
+  │          │ API                          │ qualify and a schema-aware    │
+  │          │                              │ optimizer                     │
+  ├──────────┼──────────────────────────────┼───────────────────────────────┤
+  │ Our use  │ Is it valid Postgres?        │ All name resolution,          │
+  │          │ Identical-tree shortcut      │ rewriting and serialization   │
+  └──────────┴──────────────────────────────┴───────────────────────────────┘
+
+  We use both because neither can do the whole job alone. pglast is accurate but
+  gives us nothing to rewrite with. sqlglot has the tooling but can't be
+  trusted on every corner of the syntax. So pglast checks the query and sqlglot
+  does the rewriting.
+
+  So yes, some Postgres syntax isn't understood
+
+  I ran the cases we work around through the stock sqlglot in .venv (version
+  25.34.1), without our patches loaded:
+
+  Postgres input: x BETWEEN SYMMETRIC 10 AND 1
+  What stock sqlglot does: Reads SYMMETRIC as a column name: x BETWEEN SYMMETRIC
+
+  AND 10 AND 1. The meaning changes silently.
+  Our fix: _parse_between_symmetric expands it to (x >= 10 AND x <= 1) OR (x >=
+  1
+  AND x <= 10) before parsing (canonical.py:316 (sqleval/canonical.py#L316))
+  ────────────────────────────────────────
+  Postgres input: b IS UNKNOWN
+  What stock sqlglot does: ParseError
+  Our fix: _rewrite_is_unknown turns it into b IS NULL first (canonical.py:297
+  (sqleval/canonical.py#L297))
+  ────────────────────────────────────────
+  Postgres input: INTERVAL '0.5 hours'
+  What stock sqlglot does: Becomes INTERVAL '5 HOURS'. The number is wrong.
+  Our fix: Override exp.INTERVAL_STRING_RE so only a whole integer plus unit is
+  split (canonical.py:33 (sqleval/canonical.py#L33))
+  ────────────────────────────────────────
+  Postgres input: INTERVAL '-1 day'
+  What stock sqlglot does: Becomes INTERVAL '1 DAY'. The sign is lost.
+  Our fix: Same override
+  ────────────────────────────────────────
+  Postgres input: NATURAL JOIN
+  What stock sqlglot does: Parsed as a join with no condition
+  Our fix: _natural_to_using resolves the shared columns against the schema
+  (canonical.py:345 (sqleval/canonical.py#L345))
+  ────────────────────────────────────────
+  Postgres input: Hypothetical-set aggregates (rank() WITHIN GROUP (...))
+  What stock sqlglot does: Treated as the window function
+  Our fix: _mark_aggregates (canonical.py:379 (sqleval/canonical.py#L379))
+
+  Some of the oddities go the other way: sqlglot is more lenient than Postgres.
+  It accepts IFNULL, NVL and DATEADD and quietly maps several to Postgres
+  functions. That's why validate.py:13-20 (sqleval/validate.py#L13-L20) rejects
+  foreign function names up front, so a MySQL-style query can't slip through as
+  valid Postgres.
+
+  How the two parsers are kept consistent
+
+  1. pglast decides validity. If Postgres's own parser rejects the query, the
+     verdict is invalid before sqlglot ever runs.
+  2. sqlglot failures count as our limitation, not the query's fault. A sqlglot
+     parse error becomes Unsupported (partial credit by text similarity), not
+     Invalid. When sqlglot's qualify can't resolve a column, _pg_columns_exist
+     asks pglast whether the columns really exist. If they do, sqlglot misparsed
+     and the result is Unsupported; if not, the column really is bad and the
+     result is Invalid (canonical.py:425-431 (sqleval/canonical.py#L425-L431)).
+
+  Remaining risk
+
+  The cases that fail with an error are harmless: they end up Unsupported. The
+  dangerous ones are where sqlglot silently builds a different tree, as with
+  BETWEEN SYMMETRIC and the INTERVAL strings. Both queries would then be
+  canonicalized from the wrong meaning, and an unequal pair could match. We only
+  patch the cases we've found.
+
+  One cheap way to find more: for every query in the dataset, check that
+  sqlglot's tree, written back out as Postgres SQL and re-parsed with pglast,
+  matches pglast's tree of the original. Any mismatch is a misparse to
+  investigate. I can write that check if you'd like.
+
+❯ yes write that check
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ I'll build a prototype first to see how much harmless noise the round-trip
+  produces before writing the final script.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The round trip checks out: 3,090 queries match exactly, 161 are correctly
+  rejected, and 93 differ—mostly benign normalization like case or syntax
+  variants. I'll now pinpoint exactly where each of those 93 pairs diverges and
+  group them to isolate any real misparses.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Most of the diffs are harmless (leftover location fields, case differences,
+  equivalent spellings, and our own patches), but date_part(...) becoming
+  EXTRACT(...) is a real semantic change. Before filtering out the harmless
+  cases, I'll dig into two remaining groups I can't yet explain.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ These remaining cases are harmless: NOT x IN (…) matches x NOT IN (…) even
+  with NULLs, and strpos(s, p) equals position(p IN s). Next I'll check how the
+  BETWEEN SYMMETRIC patch handles non-literal bounds to ensure the filter treats
+  that rewrite correctly.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ I'll now write the real script, matching the style of check_postgres.py, but
+  first I need to confirm pglast's exact JSON shapes for the nodes the filter
+  rewrites.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Write(generator/check_parse.py)  ⎿  Wrote 267 lines to generator/check_parse.py
+       1 """Check that sqlglot reads every dataset query the way PostgreS
+       2
+       3 Run from the repo root:
+         ]
+       5
+         sreads is canonicalized from the
+       7 wrong meaning, and a silent misread can make two different queri
+       8 the gate accepts (pglast, i.e. PostgreSQL's own parser):
+       9
+         -----> tree A
+     … +322 lines (ctrl+o to expand)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The check works: 3,090 queries round-trip identically, 92 differ harmlessly,
+  and one real issue surfaced—sqlglot's date_part→EXTRACT rewrite returns a
+  different type since Postgres 14. Next I'll verify the check catches known
+  misparses by disabling our INTERVAL patch, test some filter edge cases, and
+  check whether the date_part rewrite affects scoring.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Disabling the INTERVAL fix confirms the check now catches both silent misread
+  cases, but INTERVAL '0.5 hours' still gets flagged even with the fix active.
+  I'll check what sqlglot outputs for that case.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The INTERVAL fix works as expected. The remaining flag is just now() being
+  rewritten as CURRENT_TIMESTAMP, which are equivalent in Postgres, so I'll add
+  that to the harmless list.
+
+⏺ Update(generator/check_parse.py)
+  ⎿  Added 2 lines
+      156              f = {**f, "args": [_lower_const(f["args"][0])] + f
+           ["args"][1:]}
+      157          if names == ["pg_catalog", "position"]:  # position(p 
+           IN s) is parsed as position(s, p): strpos(s, p)
+      158              f = {**f, "funcname": [{"String": {"sval": "strpos
+           "}}], "funcformat": "COERCE_EXPLICIT_CALL"}
+      159 +        if names in (["now"], ["pg_catalog", "now"]) and not f
+          +.get("args"):  # now() is CURRENT_TIMESTAMP                   
+      160 +            return {"SQLValueFunction": {"op": "SVFOP_CURRENT_
+          +TIMESTAMP", "typmod": -1}}                                    
+      161          o = {"FuncCall": f}
+      162      tc = o.get("TypeCast")
+      163      if tc and [_sval(n) for n in tc["typeName"]["names"]][-1:]
+            == ["interval"]:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ I added the check as generator/check_parse.py, next to check_postgres.py. Over
+  the dataset it found one real problem: sqlglot treats date_part(...) and
+  EXTRACT(...) as the same thing, and they aren't in Postgres 14+. That means
+  the scorer currently gives false matches for that pattern.
+
+  Run it with:
+  .venv/bin/python -m generator.check_parse [--show N] [files.jsonl ...]
+
+  How it works
+
+  For every distinct query in the files (it reads the ground_truth, predicted
+  and sql fields):
+  1. Postgres's own parser (pglast) builds tree A from the original SQL.
+  2. Our sqlglot path (canonical.parse_postgres, patches included) parses the
+     same SQL, prints it back as Postgres SQL, and pglast parses that into tree
+     B.
+  3. If A equals B, the query is fine. If not, both trees go through a filter
+     that removes differences that don't change meaning. Anything left over is
+     printed with the tree paths that differ, and the script exits with
+     status 1.
+
+  Queries sqlglot can't parse at all are only counted, since the scorer already
+  marks those "unsupported", which is safe.
+
+  The filter treats these differences as harmless:
+  - Spelling and case: upper vs lower case in date_trunc, EXTRACT and INTERVAL
+    units; .5 vs 0.5.
+  - Negation: NOT x IS TRUE vs x IS NOT TRUE, and the same for IN, LIKE and
+    BETWEEN.
+  - Implied defaults written out: ASC NULLS LAST and DESC NULLS FIRST; ROWS
+    UNBOUNDED PRECEDING vs its BETWEEN … AND CURRENT ROW form.
+  - Equivalent functions: position() vs strpos(), now() vs CURRENT_TIMESTAMP.
+  - Our own rewrites: BETWEEN SYMMETRIC and IS UNKNOWN.
+
+  Results on the dataset
+
+  ┌───────────────────────────────────────────┬─────────┐
+  │                  Outcome                  │ Queries │
+  ├───────────────────────────────────────────┼─────────┤
+  │ Identical trees                           │ 3,090   │
+  ├───────────────────────────────────────────┼─────────┤
+  │ Rejected by our validity check (expected) │ 160     │
+  ├───────────────────────────────────────────┼─────────┤
+  │ Harmless differences only                 │ 92      │
+  ├───────────────────────────────────────────┼─────────┤
+  │ Real difference                           │ 1       │
+  └───────────────────────────────────────────┴─────────┘
+
+  I also tested whether the check would catch a known misparse. With our
+  INTERVAL fix switched off, it flags both INTERVAL '0.5 hours' and '-1 day';
+  with the fix on, both pass. So it does catch silent misreads, not just
+  crashes.
+
+  The finding: date_part vs EXTRACT
+
+  sqlglot rewrites date_part('year', x) as EXTRACT(year FROM x). Since Postgres
+  14, date_part returns double precision and EXTRACT returns numeric.
+  - Inside a comparison it doesn't matter. In the one dataset pair where it
+    appears (p00968), both sides of an equality use the same function, so that
+    pair's "equivalent" label is correct.
+  - In the output it does matter. I ran compare() on two cases and both came
+    back as canonical_match. The real outputs differ:
+    - SELECT date_part('epoch', "HireDate") vs SELECT EXTRACT(epoch FROM
+      "HireDate"): 1704067200 vs 1704067200.000000.
+    - date_part('year', d) / 7 vs EXTRACT(year FROM d) / 7: 289.142857142857 vs
+      289.1428571428571429.
+
+  To fix it, the canonicalizer needs to keep date_part distinct from EXTRACT
+  wherever the value reaches the output or arithmetic. In plain comparisons the
+  two can still be treated as the same.
+
+  Limitations
+
+  - A misread that sqlglot prints back exactly as it misread it (same wrong
+    meaning on parse and print) passes unnoticed.
+  - Errors introduced after parsing, in qualify or in the rewrite rules, aren't
+    covered. That's what the counterexample audit is for.
+
+  Nothing is committed. Should I fix the date_part handling in canonical.py and
+  add a test for it?
+
+❯ <ide_opened_file>The user opened the file
+  /Users/kartikuppalapati/Documents/Projects/SQL-Checker/sqleval/cli.py in the
+  IDE. This may or may not be related to the current task.</ide_opened_file>
+
+❯ yes fix that
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ sqlglot represents both spellings with the same Extract node, so the original
+  syntax isn't preserved in the tree. I'll check how canonical.py handles
+  Extract before deciding how to track this distinction.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ I'll mark Extract nodes originating from date_part at parse time so the
+  serializer distinguishes them while comparisons still treat them as
+  equivalent. Now checking sqlglot's DATE_PART hook and how the serializer and
+  type helpers handle Extract.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+⏺ Tagging the node in sqlglot's _parse_date_part fixes both the equivalence
+  mismatch between date_part and EXTRACT and the type checker incorrectly
+  accepting invalid cases like ROUND(date_part(...), 2). I'll review how the
+  equivalence tests are structured before making the change.
+
+  Searched for 1 pattern, ran 2 shell commands (ctrl+o to expand)
+
+⏺ The baseline suite passes (4 tests). Now the fix: tag date_part nodes at parse
+  time, drop the tag where the two forms behave the same, and type tagged nodes
+  as double precision in the checker.
+
+⏺ Update(sqleval/canonical.py)
+  ⎿  Added 14 lines
+      32  # sqlglot splits INTERVAL '<n> <unit>' with an unanchored finda
+          ll, so '0.5 hours' became '5 hours' and
+      33  # '-1 day' lost its sign. Split only a whole '<integer> <unit>'
+           string; anything else stays a literal.
+      34  exp.INTERVAL_STRING_RE = re.compile(r"^\s*([0-9]+)\s*([a-zA-Z]+
+          )\s*$")
+      35 +                                                               
+      36 +# sqlglot reads date_part(f, x) as EXTRACT(f FROM x), but date_
+         +part returns double precision and EXTRACT                      
+      37 +# returns numeric (PostgreSQL 14+). Mark the node, so the two s
+         +tay apart wherever the type can show.                          
+      38 +from sqlglot.dialects.postgres import Postgres as _Postgres    
+      39 +_sqlglot_parse_date_part = _Postgres.Parser._parse_date_part   
+      40 +                                                               
+      41 +                                                               
+      42 +def _parse_date_part(self):                                    
+      43 +    node = _sqlglot_parse_date_part(self)                      
+      44 +    node.set("date_part", True)                                
+      45 +    return node                                                
+      46 +                                                               
+      47 +                                                               
+      48 +_Postgres.Parser._parse_date_part = _parse_date_part           
+      49  from .validate import Invalid
+      50  
+      51  
+
+⏺ Update(sqleval/canonical.py)
+  ⎿  Added 23 lines
+      1432      for e in tree.find_all(exp.Extract):
+      1433          if isinstance(e.this, (exp.Var, exp.Identifier)):
+      1434              e.set("this", exp.var(e.this.name.upper()))
+      1435 +        if e.args.get("date_part") and _compared_with_exact_n
+           +umber(e):                                                    
+      1436 +            e.set("date_part", None)                         
+      1437      return tree
+      1438  
+      1439  
+      1440 +def _compared_with_exact_number(e):                          
+      1441 +    """date_part(f, x) is EXTRACT(f FROM x) as double precisi
+           +on. Compared with an integer literal or                      
+      1442 +    another EXTRACT / date_part, both spellings give the same
+           + truth value (the comparison runs in                         
+      1443 +    double precision either way, and the conversion keeps the
+           + order); in output or arithmetic the                         
+      1444 +    type shows."""                                           
+      1445 +    node = e                                                 
+      1446 +    while isinstance(node.parent, exp.Paren):                
+      1447 +        node = node.parent                                   
+      1448 +    p = node.parent                                          
+      1449 +    if isinstance(p, (exp.EQ, exp.NEQ, exp.LT, exp.LTE, exp.G
+           +T, exp.GTE)):                                                
+      1450 +        other = p.expression if p.this is node else p.this   
+      1451 +        while isinstance(other, exp.Paren):                  
+      1452 +            other = other.this                               
+      1453 +        return isinstance(other, exp.Extract) or _lit_int(oth
+           +er) is not None                                              
+      1454 +    if isinstance(p, exp.Between) and p.this is node:        
+      1455 +        return _lit_int(p.args.get("low")) is not None and _l
+           +it_int(p.args.get("high")) is not None                       
+      1456 +    if isinstance(p, exp.In) and p.this is node and p.express
+           +ions and not p.args.get("query"):                            
+      1457 +        return all(_lit_int(x) is not None for x in p.express
+           +ions)                                                        
+      1458 +    return False                                             
+      1459 +                                                             
+      1460 +                                                             
+      1461  _SET_RETURNING = (exp.Unnest, exp.Explode, exp.GenerateSeries
+            )
+      1462  
+      1463  
+
+⏺ Update(sqleval/semantic.py)
+  ⎿  Added 4 lines, removed 2 lines
+      401              return self.datatype(e.to)
+      402          if isinstance(e, exp.Interval):
+      403              return ("T", None)
+      404 -        if isinstance(e, (exp.Count, exp.RowNumber, exp.Length
+          -, exp.StrPosition, exp.Extract)):                             
+      405 -            return ("N", "int" if not isinstance(e, exp.Extrac
+          -t) else "dec")                                                
+      404 +        if isinstance(e, exp.Extract):  # EXTRACT returns nume
+          +ric, date_part double precision                               
+      405 +            return ("N", "float" if e.args.get("date_part") el
+          +se "dec")                                                     
+      406 +        if isinstance(e, (exp.Count, exp.RowNumber, exp.Length
+          +, exp.StrPosition)):                                          
+      407 +            return ("N", "int")                               
+      408          if isinstance(e, (exp.Lower, exp.Upper, exp.Trim, exp.
+           Concat, exp.DPipe, exp.Substring, exp.TimeToStr,
+      409                            exp.Initcap, exp.GroupConcat)):
+      410              return ("S", None)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ All 9 cases work as expected, and the validity check correctly rejects
+  ROUND(date_part(...) / 60, 1) like Postgres does. Now I'll add regression
+  tests, and check whether the embedded Postgres used in check_postgres is
+  available so I can verify the new entry against real Postgres.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Since embedded Postgres isn't installed, I can't verify a new test_gate.py
+  entry against a real server, so I'll add the ROUND(date_part(...)) case to
+  test_equivalence.py instead, next to the existing round case, to avoid falsely
+  claiming verification.
+
+⏺ Update(tests/test_equivalence.py)
+  ⎿  Added 19 lines
+      1078       "SELECT driver_id, SUM(distance_km::numeric) FROM trips 
+            GROUP BY driver_id", False, "an exact sum is not the double-p
+            recision sum"),
+      1079      (RIDE, "SELECT id FROM trips WHERE completed_at - started
+            _at > INTERVAL '30 minutes'",
+      1080       "SELECT id FROM trips WHERE completed_at - started_at > 
+            30", False, "there is no interval > integer operator"),
+      1081 +    # --- date_part returns double precision, EXTRACT numeric
+           + ------------------------------------------                  
+      1082 +    (ORG, '''SELECT EXTRACT(EPOCH FROM "HireDate") FROM "Empl
+           +oyee"''',                                                    
+      1083 +     '''SELECT date_part('epoch', "HireDate") FROM "Employee"
+           +''', False, "date_part output is double precision"),         
+      1084 +    (ORG, '''SELECT EXTRACT(YEAR FROM "HireDate") / 7 FROM "E
+           +mployee"''',                                                 
+      1085 +     '''SELECT date_part('year', "HireDate") / 7 FROM "Employ
+           +ee"''', False, "date_part arithmetic is double precision"),  
+      1086 +    (ORG, '''SELECT date_part('year', "HireDate") FROM "Emplo
+           +yee"''',                                                     
+      1087 +     '''SELECT DATE_PART('YEAR', "HireDate") FROM "Employee"'
+           +'', True, "date_part spelled differently"),                  
+      1088 +    (ORG, '''SELECT "Name" FROM "Employee" WHERE EXTRACT(YEAR
+           + FROM "HireDate") = 2020''',                                 
+      1089 +     '''SELECT "Name" FROM "Employee" WHERE date_part('year',
+           + "HireDate") = 2020''', True,                                
+      1090 +     "date_part compared with an integer"),                  
+      1091 +    (ORG, '''SELECT "Name" FROM "Employee" WHERE EXTRACT(MONT
+           +H FROM "HireDate") BETWEEN 1 AND 3''',                       
+      1092 +     '''SELECT "Name" FROM "Employee" WHERE date_part('month'
+           +, "HireDate") BETWEEN 1 AND 3''', True,                      
+      1093 +     "date_part BETWEEN integers"),                          
+      1094 +    (RIDE, "SELECT id FROM trips WHERE completed_at - started
+           +_at > INTERVAL '30 minutes'",                                
+      1095 +     "SELECT id FROM trips WHERE date_part('epoch', completed
+           +_at - started_at) > 1800", True,                             
+      1096 +     "the duration in seconds via date_part"),               
+      1097 +    (RIDE, "SELECT ROUND(EXTRACT(EPOCH FROM completed_at - st
+           +arted_at) / 60, 1) FROM trips",                              
+      1098 +     "SELECT ROUND(date_part('epoch', completed_at - started_
+           +at) / 60, 1) FROM trips", False,                             
+      1099 +     "round(double precision, integer) does not exist, and da
+           +te_part is double precision"),                               
+      1100  ]
+      1101  
+      1102  
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Tests pass; the scoring comparison only failed because ./score used the system
+  Python instead of the venv, so I'll rerun it there. check_parse still flags
+  date_part since sqlglot prints EXTRACT, so I'll mark it handled in the check
+  like our BETWEEN SYMMETRIC/IS UNKNOWN rewrites so it exits clean.
+
+⏺ Update(generator/check_parse.py)
+  ⎿  Added 4 lines
+      158              f = {**f, "funcname": [{"String": {"sval": "strpos
+           "}}], "funcformat": "COERCE_EXPLICIT_CALL"}
+      159          if names in (["now"], ["pg_catalog", "now"]) and not f
+           .get("args"):  # now() is CURRENT_TIMESTAMP
+      160              return {"SQLValueFunction": {"op": "SVFOP_CURRENT_
+           TIMESTAMP", "typmod": -1}}
+      161 +        if names in (["date_part"], ["pg_catalog", "date_part"
+          +]):                                                           
+      162 +            # sqlglot prints date_part as EXTRACT; the harness
+          + keeps them apart (canonical._parse_date_part)                
+      163 +            f = {**f, "funcname": [{"String": {"sval": "pg_cat
+          +alog"}}, {"String": {"sval": "extract"}}],                    
+      164 +                 "funcformat": "COERCE_SQL_SYNTAX"}           
+      165          o = {"FuncCall": f}
+      166      tc = o.get("TypeCast")
+      167      if tc and [_sval(n) for n in tc["typeName"]["names"]][-1:]
+            == ["interval"]:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ I fixed the date_part vs EXTRACT problem. The scorer now treats them as
+  different wherever their types change the result, and as the same in
+  comparisons, where they always agree. The full test suite passes with 7 new
+  cases, and the 3,193 dataset pairs score exactly as before.
+
+  The fix
+
+  - Tag date_part at parse time (canonical.py:35-46
+    (sqleval/canonical.py#L35-L46)). sqlglot reads date_part(...) as an EXTRACT
+    node, so the tree no longer shows which one was written. I wrapped sqlglot's
+    Postgres date_part parser, the same way we already patch its INTERVAL
+    handling, so the node records that it came from date_part. The serializer
+    writes that tag into the canonical string, so the two spellings produce
+    different strings.
+  - Drop the tag where the type can't matter. In comparisons the two always give
+    the same answer, so the tag is removed when the value is:
+    - compared with =, <>, <, <=, > or >= against an integer literal or another
+      EXTRACT/date_part;
+    - used in BETWEEN with integer bounds;
+    - used in IN with a list of integers.
+
+    That's why date_part('year', d) = 2020 still matches EXTRACT(YEAR FROM d) =
+    2020. The code is _compared_with_exact_number in canonical.py
+    (sqleval/canonical.py), called from _normalize_clauses. Comparisons with
+    decimal literals keep the tag, so those pairs are scored as not equivalent;
+    I chose that to stay on the safe side.
+  - Correct the type (semantic.py:404-407 (sqleval/semantic.py#L404-L407)). The
+    type checker now types tagged nodes as double precision. As a result it
+    rejects ROUND(date_part(...) / 60, 1), which Postgres rejects with
+    "round(double precision, integer) does not exist". Before, our validity
+    check accepted it.
+
+  Checks
+
+  - Tests: 7 new cases in test_equivalence.py (tests/test_equivalence.py).
+    Output and arithmetic must not match; same spelling in a different case,
+    comparison with an integer, BETWEEN, epoch-vs-interval, and the invalid
+    ROUND are each covered.
+  - Dataset: scored before and after. The per-pair results file is
+    byte-identical, and the label metrics are unchanged (precision 100%, recall
+    98.0%, 0 false positives). The one dataset pair using date_part compares it
+    inside a comparison, so it still matches, which is correct.
+  - check_parse.py (generator/check_parse.py): it now counts date_part → EXTRACT
+    as handled and exits 0 on the dataset, so it can run in CI.
+
+  The ROUND(date_part(...)) rejection is based on Postgres's documented function
+  signatures. I couldn't run it against a real server because pgserver isn't
+  installed in .venv. For that reason I put that case in test_equivalence.py
+  rather than test_gate.py, whose entries are all stated to have been run on
+  Postgres 16.2.
+
+  Nothing is committed: canonical.py, semantic.py and test_equivalence.py are
+  modified and check_parse.py is new.

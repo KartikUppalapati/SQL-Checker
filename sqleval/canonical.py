@@ -32,6 +32,20 @@ from .schema import Catalog
 # sqlglot splits INTERVAL '<n> <unit>' with an unanchored findall, so '0.5 hours' became '5 hours' and
 # '-1 day' lost its sign. Split only a whole '<integer> <unit>' string; anything else stays a literal.
 exp.INTERVAL_STRING_RE = re.compile(r"^\s*([0-9]+)\s*([a-zA-Z]+)\s*$")
+
+# sqlglot reads date_part(f, x) as EXTRACT(f FROM x), but date_part returns double precision and EXTRACT
+# returns numeric (PostgreSQL 14+). Mark the node, so the two stay apart wherever the type can show.
+from sqlglot.dialects.postgres import Postgres as _Postgres
+_sqlglot_parse_date_part = _Postgres.Parser._parse_date_part
+
+
+def _parse_date_part(self):
+    node = _sqlglot_parse_date_part(self)
+    node.set("date_part", True)
+    return node
+
+
+_Postgres.Parser._parse_date_part = _parse_date_part
 from .validate import Invalid
 
 
@@ -1418,7 +1432,30 @@ def _normalize_clauses(tree):
     for e in tree.find_all(exp.Extract):
         if isinstance(e.this, (exp.Var, exp.Identifier)):
             e.set("this", exp.var(e.this.name.upper()))
+        if e.args.get("date_part") and _compared_with_exact_number(e):
+            e.set("date_part", None)
     return tree
+
+
+def _compared_with_exact_number(e):
+    """date_part(f, x) is EXTRACT(f FROM x) as double precision. Compared with an integer literal or
+    another EXTRACT / date_part, both spellings give the same truth value (the comparison runs in
+    double precision either way, and the conversion keeps the order); in output or arithmetic the
+    type shows."""
+    node = e
+    while isinstance(node.parent, exp.Paren):
+        node = node.parent
+    p = node.parent
+    if isinstance(p, (exp.EQ, exp.NEQ, exp.LT, exp.LTE, exp.GT, exp.GTE)):
+        other = p.expression if p.this is node else p.this
+        while isinstance(other, exp.Paren):
+            other = other.this
+        return isinstance(other, exp.Extract) or _lit_int(other) is not None
+    if isinstance(p, exp.Between) and p.this is node:
+        return _lit_int(p.args.get("low")) is not None and _lit_int(p.args.get("high")) is not None
+    if isinstance(p, exp.In) and p.this is node and p.expressions and not p.args.get("query"):
+        return all(_lit_int(x) is not None for x in p.expressions)
+    return False
 
 
 _SET_RETURNING = (exp.Unnest, exp.Explode, exp.GenerateSeries)

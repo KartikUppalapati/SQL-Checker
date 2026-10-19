@@ -401,8 +401,10 @@ class _Typer:
             return self.datatype(e.to)
         if isinstance(e, exp.Interval):
             return ("T", None)
-        if isinstance(e, (exp.Count, exp.RowNumber, exp.Length, exp.StrPosition, exp.Extract)):
-            return ("N", "int" if not isinstance(e, exp.Extract) else "dec")
+        if isinstance(e, exp.Extract):  # EXTRACT returns numeric, date_part double precision
+            return ("N", "float" if e.args.get("date_part") else "dec")
+        if isinstance(e, (exp.Count, exp.RowNumber, exp.Length, exp.StrPosition)):
+            return ("N", "int")
         if isinstance(e, (exp.Lower, exp.Upper, exp.Trim, exp.Concat, exp.DPipe, exp.Substring, exp.TimeToStr,
                           exp.Initcap, exp.GroupConcat)):
             return ("S", None)
